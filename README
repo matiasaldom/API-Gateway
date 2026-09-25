@@ -1,0 +1,59 @@
+# API Gateway
+
+A high-performance API Gateway written in Go.
+
+## Features
+
+- Reverse proxy routing
+- API key authentication
+- PostgreSQL-backed identity storage
+- Request tracing IDs
+- Structured logging
+- Configuration-driven routing
+
+## Architecture
+
+Client
+→ Gateway
+→ Authentication
+→ Routing
+→ Reverse Proxy
+→ Backend Services
+
+## Tech Stack
+
+- Go
+- PostgreSQL
+- Docker
+- YAML Configuration
+
+## Running Locally
+
+### Start PostgreSQL
+
+docker run ...
+
+### Configure Environment
+
+DATABASE_URL=...
+
+### Start Gateway
+
+go run ./cmd/gateway
+
+## Health Check
+
+curl http://localhost:8080/health
+
+## Tests
+
+go test ./...
+
+## Roadmap
+
+- [x] Reverse proxy
+- [x] API key authentication
+- [ ] Rate limiting
+- [ ] Response caching
+- [ ] Analytics
+- [ ] Management API

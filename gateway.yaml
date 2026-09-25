@@ -1,0 +1,8 @@
+listen_addr: ":8080"
+upstream_timeout: 30s
+
+routes:
+  - prefix: /users
+    upstream: http://localhost:8081
+  - prefix: /albums
+    upstream: http://localhost:8082
