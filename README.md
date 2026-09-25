@@ -37,9 +37,21 @@ docker run ...
 
 DATABASE_URL=...
 
+### Apply Migrations
+
+psql "$DATABASE_URL" -f migrations/000001_identity.up.sql
+
 ### Start Gateway
 
 go run ./cmd/gateway
+
+### Create an API Key
+
+go run ./cmd/apikey create -email dev@example.com -app "My App"
+
+curl http://localhost:8080/users/1 -H "Authorization: Bearer <key>"
+
+See [docs/authentication.md](docs/authentication.md) for key management, error responses, and logging.
 
 ## Health Check
 
