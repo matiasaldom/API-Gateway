@@ -65,7 +65,25 @@ go test ./...
 
 - [x] Reverse proxy
 - [x] API key authentication
+- [x] API key administration CLI
+- [x] PostgreSQL persistence
 - [ ] Rate limiting
 - [ ] Response caching
 - [ ] Analytics
 - [ ] Management API
+
+## Current Status
+
+Completed:
+- Reverse proxy routing
+- API key authentication
+- PostgreSQL-backed identity storage
+- API key creation, revocation, and listing CLI
+- Request ID tracing
+- Structured logging
+- Integration tests
+
+In Progress:
+- Rate limiting
+- Response caching
+- Analytics
