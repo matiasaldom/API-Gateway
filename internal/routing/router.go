@@ -7,13 +7,15 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"api-gateway/internal/config"
 )
 
 type Route struct {
-	Prefix string
-	Target *url.URL
+	Prefix   string
+	Target   *url.URL
+	CacheTTL time.Duration // 0 disables response caching
 }
 
 // Router resolves a request path to the route with the longest matching prefix.
@@ -44,7 +46,10 @@ func New(defs []config.Route) (*Router, error) {
 		if err != nil {
 			return nil, fmt.Errorf("route %q: %w", prefix, err)
 		}
-		routes = append(routes, Route{Prefix: prefix, Target: target})
+		if d.CacheTTL < 0 {
+			return nil, fmt.Errorf("route %q: cache_ttl must not be negative", prefix)
+		}
+		routes = append(routes, Route{Prefix: prefix, Target: target, CacheTTL: d.CacheTTL})
 	}
 
 	sort.SliceStable(routes, func(i, j int) bool {
@@ -61,6 +66,15 @@ func (r *Router) Match(path string) (Route, bool) {
 		}
 	}
 	return Route{}, false
+}
+
+// CacheTTL returns the cache TTL of the route matching path, or 0 if none matches.
+func (r *Router) CacheTTL(path string) time.Duration {
+	rt, ok := r.Match(path)
+	if !ok {
+		return 0
+	}
+	return rt.CacheTTL
 }
 
 // Routes returns all configured routes, longest prefix first.

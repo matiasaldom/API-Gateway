@@ -9,16 +9,19 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"api-gateway/internal/auth"
+	"api-gateway/internal/cache"
 	"api-gateway/internal/config"
 	"api-gateway/internal/limiter"
 	"api-gateway/internal/proxy"
 	"api-gateway/internal/requestid"
+	"api-gateway/internal/routing"
 	"api-gateway/internal/storage"
 	"api-gateway/internal/testdb"
 )
@@ -33,7 +36,20 @@ type authEnv struct {
 	revokedKey string
 	gatewayURL string
 	logs       *syncBuffer
+
+	upstreamCalls *atomic.Int64 // requests that reached the backend
+	cache         *cache.Cache
+	cacheClock    *testClock
 }
+
+// testClock is a settable time source.
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *testClock) Now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *testClock) Add(d time.Duration) { c.mu.Lock(); defer c.mu.Unlock(); c.t = c.t.Add(d) }
 
 func newAuthEnv(t *testing.T) authEnv {
 	t.Helper()
@@ -62,15 +78,36 @@ func newAuthEnv(t *testing.T) authEnv {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(env.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	upstream := newEchoUpstream(t, "users")
+	env.upstreamCalls = new(atomic.Int64)
+	echo := echoHandler("users")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		env.upstreamCalls.Add(1)
+		echo(w, r)
+	}))
+	t.Cleanup(upstream.Close)
+
+	// /users is uncached; /albums caches GETs for 30s.
+	routes := []config.Route{
+		{Prefix: "/users", Upstream: upstream.URL},
+		{Prefix: "/albums", Upstream: upstream.URL, CacheTTL: 30 * time.Second},
+	}
+	router, err := routing.New(routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// Same chain as cmd/gateway. The limiter clock is frozen mid-window so
-	// rate-limit tests can't straddle a minute boundary and flake.
+	// rate-limit tests can't straddle a minute boundary and flake; the cache
+	// clock is advanced by tests to expire entries.
 	frozen := time.Date(2026, 9, 26, 12, 0, 30, 0, time.UTC)
+	env.cacheClock = &testClock{t: frozen}
+	env.cache = cache.New(16<<20, env.cacheClock.Now)
 	h, err := proxy.NewHandler(
-		&config.Config{UpstreamTimeout: 5 * time.Second, Routes: []config.Route{{Prefix: "/users", Upstream: upstream.URL}}},
+		&config.Config{UpstreamTimeout: 5 * time.Second, Routes: routes},
 		logger,
 		auth.Middleware(db, logger),
 		limiter.Middleware(limiter.New(func() time.Time { return frozen }), logger),
+		cache.Middleware(env.cache, router.CacheTTL),
 	)
 	if err != nil {
 		t.Fatal(err)

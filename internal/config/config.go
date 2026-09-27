@@ -29,6 +29,8 @@ type Config struct {
 type Route struct {
 	Prefix   string `yaml:"prefix"`
 	Upstream string `yaml:"upstream"`
+	// CacheTTL caches successful GET responses for this long; 0 (the default) disables caching.
+	CacheTTL time.Duration `yaml:"cache_ttl"`
 }
 
 // Load reads and decodes the YAML file at path, applying defaults.

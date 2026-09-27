@@ -6,3 +6,4 @@ routes:
     upstream: http://localhost:8081
   - prefix: /albums
     upstream: http://localhost:8082
+    # cache_ttl: 30s   # cache GET responses per API key; omit or 0 to disable

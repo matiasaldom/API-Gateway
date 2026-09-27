@@ -2,6 +2,7 @@ package routing
 
 import (
 	"testing"
+	"time"
 
 	"api-gateway/internal/config"
 )
@@ -87,11 +88,27 @@ func TestNewRejectsInvalidRoutes(t *testing.T) {
 		"unsupported scheme":  {{Prefix: "/users", Upstream: "ftp://a"}},
 		"missing host":        {{Prefix: "/users", Upstream: "http://"}},
 		"query in upstream":   {{Prefix: "/users", Upstream: "http://a?x=1"}},
+		"negative cache ttl":  {{Prefix: "/users", Upstream: "http://a", CacheTTL: -time.Second}},
 		"unparseable address": {{Prefix: "/users", Upstream: "http://a b"}},
 	}
 	for name, routes := range tests {
 		if _, err := New(routes); err == nil {
 			t.Errorf("%s: expected error", name)
+		}
+	}
+}
+
+func TestCacheTTL(t *testing.T) {
+	r, err := New([]config.Route{
+		{Prefix: "/users", Upstream: "http://a"},
+		{Prefix: "/albums", Upstream: "http://b", CacheTTL: 30 * time.Second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]time.Duration{"/albums/1": 30 * time.Second, "/users/1": 0, "/unrouted": 0} {
+		if got := r.CacheTTL(path); got != want {
+			t.Errorf("CacheTTL(%q) = %s, want %s", path, got, want)
 		}
 	}
 }

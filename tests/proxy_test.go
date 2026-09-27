@@ -29,7 +29,14 @@ type echo struct {
 
 func newEchoUpstream(t *testing.T, service string) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(echoHandler(service))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// echoHandler reports the request it received back as JSON (201 for POST).
+func echoHandler(service string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Upstream", service)
@@ -44,9 +51,7 @@ func newEchoUpstream(t *testing.T, service string) *httptest.Server {
 			Header:  r.Header,
 			Body:    string(body),
 		})
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+	}
 }
 
 func newGateway(t *testing.T, timeout time.Duration, logs io.Writer, routes ...config.Route) http.Handler {
