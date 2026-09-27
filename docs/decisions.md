@@ -130,3 +130,28 @@ Future Consideration:
   instance applies edits without a restart
 - POST/DELETE /admin/routes if routes should be managed without
   gateway.yaml at all
+ADR-006
+
+The dashboard (dashboard/) is a separate Vite + React app that
+calls the existing /admin/* endpoints with relative paths.
+The Vite dev and preview servers proxy /admin to the gateway,
+so the browser sees one origin. The admin token is entered at
+sign-in and kept in sessionStorage.
+
+Pros:
+- No backend changes: no CORS, no static-file serving, no new
+  endpoints in the gateway
+- Admin API stays same-origin, so no cross-site request surface
+- Token disappears when the tab closes
+
+Cons:
+- Hosting dist/ outside Vite needs a same-origin reverse proxy
+  in front of the gateway
+- No time-series endpoint: live charts are sampled in the
+  browser and show only what was sampled since the page opened
+- A token in sessionStorage is readable by any script on the
+  page (an XSS on the dashboard origin would expose it)
+
+Future Consideration:
+- /admin/analytics/timeseries (per-minute buckets) for history charts
+- Serve dist/ from the gateway itself behind the admin token
