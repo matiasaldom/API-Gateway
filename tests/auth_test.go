@@ -16,6 +16,7 @@ import (
 
 	"api-gateway/internal/auth"
 	"api-gateway/internal/config"
+	"api-gateway/internal/limiter"
 	"api-gateway/internal/proxy"
 	"api-gateway/internal/requestid"
 	"api-gateway/internal/storage"
@@ -62,9 +63,14 @@ func newAuthEnv(t *testing.T) authEnv {
 
 	logger := slog.New(slog.NewJSONHandler(env.logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	upstream := newEchoUpstream(t, "users")
+	// Same chain as cmd/gateway. The limiter clock is frozen mid-window so
+	// rate-limit tests can't straddle a minute boundary and flake.
+	frozen := time.Date(2026, 9, 26, 12, 0, 30, 0, time.UTC)
 	h, err := proxy.NewHandler(
 		&config.Config{UpstreamTimeout: 5 * time.Second, Routes: []config.Route{{Prefix: "/users", Upstream: upstream.URL}}},
-		logger, auth.Middleware(db, logger),
+		logger,
+		auth.Middleware(db, logger),
+		limiter.Middleware(limiter.New(func() time.Time { return frozen }), logger),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +261,7 @@ func TestAPIKeyMetadataInRequestContext(t *testing.T) {
 		t.Fatal("no API key metadata in request context")
 	}
 	if got.ID != env.activeID || got.ApplicationID != env.appID || got.UserID != wantUser ||
-		got.PlanID != wantPlan || got.Status != auth.StatusActive {
+		got.PlanID != wantPlan || got.Status != auth.StatusActive || got.RequestsPerMinute != 100 {
 		t.Errorf("context metadata = %+v, want id=%d app=%d user=%d plan=%d active",
 			got, env.activeID, env.appID, wantUser, wantPlan)
 	}

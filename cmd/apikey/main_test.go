@@ -49,6 +49,11 @@ func TestCreateListRevoke(t *testing.T) {
 		t.Fatalf("create: %v\n%s", err, out)
 	}
 	raw := lastLine(out)
+
+	if _, err := runCLI(t, dbURL, "create", "-email", "x@example.com", "-app", "X", "-plan", "enterprise"); err == nil ||
+		!strings.Contains(err.Error(), `unknown plan "enterprise"`) {
+		t.Errorf("create with unknown plan: err = %v", err)
+	}
 	if !strings.HasPrefix(raw, "gw_") || len(raw) != 46 {
 		t.Fatalf("create did not print a raw key; output:\n%s", out)
 	}

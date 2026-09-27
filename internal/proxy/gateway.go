@@ -3,7 +3,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"api-gateway/internal/config"
+	"api-gateway/internal/httpx"
 	"api-gateway/internal/requestid"
 	"api-gateway/internal/routing"
 )
@@ -27,10 +27,14 @@ type gateway struct {
 
 // NewHandler builds the full gateway handler:
 //
-//	request ID → access log → /health (public) | authenticate → router → proxy
-func NewHandler(cfg *config.Config, logger *slog.Logger, authenticate func(http.Handler) http.Handler) (http.Handler, error) {
-	if authenticate == nil {
-		return nil, errors.New("authentication middleware is required")
+//	request ID → access log → /health (public) | protect[0] → protect[1] → … → router → proxy
+//
+// protect runs in order on every non-health request; in production that is
+// authentication followed by rate limiting. At least one is required so the
+// gateway can't be built open by accident.
+func NewHandler(cfg *config.Config, logger *slog.Logger, protect ...func(http.Handler) http.Handler) (http.Handler, error) {
+	if len(protect) == 0 {
+		return nil, errors.New("at least one protecting middleware (authentication) is required")
 	}
 	router, err := routing.New(cfg.Routes)
 	if err != nil {
@@ -47,12 +51,15 @@ func NewHandler(cfg *config.Config, logger *slog.Logger, authenticate func(http.
 		g.proxies[rt.Prefix] = g.newReverseProxy(rt.Target)
 	}
 
-	protected := authenticate(g)
+	var protected http.Handler = g
+	for i := len(protect) - 1; i >= 0; i-- {
+		protected = protect[i](protected)
+	}
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Checked before auth and routing so load balancers can probe it
 		// and a "/" catch-all route can't shadow it.
 		if r.URL.Path == healthPath {
-			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			httpx.JSON(w, http.StatusOK, map[string]string{"status": "ok"})
 			return
 		}
 		protected.ServeHTTP(w, r)
@@ -63,7 +70,7 @@ func NewHandler(cfg *config.Config, logger *slog.Logger, authenticate func(http.
 func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	route, ok := g.router.Match(r.URL.Path)
 	if !ok {
-		writeError(w, r, http.StatusNotFound, "no route for path")
+		httpx.Error(w, r, http.StatusNotFound, "no route for path")
 		return
 	}
 
@@ -94,20 +101,7 @@ func (g *gateway) newReverseProxy(target *url.URL) *httputil.ReverseProxy {
 				"status", status,
 				"error", err.Error(),
 			)
-			writeError(w, r, status, http.StatusText(status))
+			httpx.Error(w, r, status, http.StatusText(status))
 		},
 	}
-}
-
-func writeError(w http.ResponseWriter, r *http.Request, status int, msg string) {
-	writeJSON(w, status, map[string]string{
-		"error":      msg,
-		"request_id": requestid.FromContext(r.Context()),
-	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
 }

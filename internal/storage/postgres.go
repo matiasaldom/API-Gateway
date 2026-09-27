@@ -51,11 +51,12 @@ func (db *DB) Close() { db.pool.Close() }
 func (db *DB) LookupAPIKey(ctx context.Context, hash []byte) (auth.APIKey, error) {
 	var k auth.APIKey
 	err := db.pool.QueryRow(ctx, `
-		select k.id, k.application_id, a.user_id, a.plan_id, k.status, k.key_hash
+		select k.id, k.application_id, a.user_id, a.plan_id, p.requests_per_minute, k.status, k.key_hash
 		from api_keys k
 		join applications a on a.id = k.application_id
+		join plans p on p.id = a.plan_id
 		where k.key_hash = $1`, hash,
-	).Scan(&k.ID, &k.ApplicationID, &k.UserID, &k.PlanID, &k.Status, &k.Hash)
+	).Scan(&k.ID, &k.ApplicationID, &k.UserID, &k.PlanID, &k.RequestsPerMinute, &k.Status, &k.Hash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.APIKey{}, auth.ErrKeyNotFound
 	}

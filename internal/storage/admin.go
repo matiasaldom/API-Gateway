@@ -24,8 +24,10 @@ type KeyInfo struct {
 }
 
 // EnsureApplication returns the ID of the application named appName owned by email,
-// creating the plan, user, and application if they don't exist. planName only
-// applies when the application is created; an existing application keeps its plan.
+// creating the user and application if they don't exist. planName must name an
+// existing plan (plans carry rate limits, so they are defined by migrations, not
+// created ad hoc). It only applies when the application is created; an existing
+// application keeps its plan.
 func (db *DB) EnsureApplication(ctx context.Context, email, appName, planName string) (int64, error) {
 	tx, err := db.pool.Begin(ctx)
 	if err != nil {
@@ -49,13 +51,12 @@ func (db *DB) EnsureApplication(ctx context.Context, email, appName, planName st
 	).Scan(&appID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var planID int64
-		err = tx.QueryRow(ctx,
-			`insert into plans (name) values ($1)
-			 on conflict (name) do update set name = excluded.name
-			 returning id`, planName,
-		).Scan(&planID)
+		err = tx.QueryRow(ctx, `select id from plans where name = $1`, planName).Scan(&planID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("unknown plan %q", planName)
+		}
 		if err != nil {
-			return 0, fmt.Errorf("ensure plan: %w", err)
+			return 0, fmt.Errorf("find plan: %w", err)
 		}
 		err = tx.QueryRow(ctx,
 			`insert into applications (user_id, plan_id, name) values ($1, $2, $3) returning id`,

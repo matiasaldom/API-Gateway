@@ -28,8 +28,10 @@ type APIKey struct {
 	ApplicationID int64
 	UserID        int64
 	PlanID        int64
-	Status        Status
-	Hash          []byte // SHA-256 of the raw key
+	// RequestsPerMinute is the plan's rate limit, loaded with the key so limiting needs no extra query.
+	RequestsPerMinute int
+	Status            Status
+	Hash              []byte // SHA-256 of the raw key
 }
 
 // ErrKeyNotFound is returned by a KeyStore when no key matches the hash.

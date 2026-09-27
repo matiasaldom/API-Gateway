@@ -21,7 +21,7 @@ Connection pool settings go in the URL's query string, for example `&pool_max_co
 Apply the migrations once, using either tool:
 
 ```sh
-psql "$DATABASE_URL" -f migrations/000001_identity.up.sql
+for f in migrations/*.up.sql; do psql "$DATABASE_URL" -f "$f"; done
 # or, with golang-migrate:
 migrate -path migrations -database "$DATABASE_URL" up
 ```
@@ -47,7 +47,7 @@ gw_3q2-7wJb9kTzYHc0VxLr8sPpN4mEaUdKfGiO1hBnXyQ
 
 - The key is always on the last line of the output, so a script can take it with `| tail -1`.
 - If the user (matched by email, ignoring case) or the application (matched by owner and name) doesn't exist yet, it is created.
-- `-plan NAME` sets the plan for a new application. It defaults to `free`. An existing application keeps its current plan.
+- `-plan NAME` sets the plan for a new application: `free` (the default) or `pro`. The plan must already exist, because plans carry rate limits (see [rate-limiting.md](rate-limiting.md)). An existing application keeps its current plan.
 - Running `create` again for the same application adds another key. This is how you rotate keys: create the new key, move your clients to it, then revoke the old one.
 
 ### List keys
@@ -107,6 +107,7 @@ Every error is JSON with the same shape. Its `request_id` matches the `X-Request
 | Wrong scheme, malformed key, or more than one `Authorization` header | `401` | `invalid api key` | `Bearer realm="api-gateway", error="invalid_token"` |
 | Well-formed key that doesn't exist | `401` | `invalid api key` | `Bearer realm="api-gateway", error="invalid_token"` |
 | Revoked key | `403` | `api key revoked` | — |
+| Valid key over its plan's rate limit (see [rate-limiting.md](rate-limiting.md)) | `429` | `rate limit exceeded` | — |
 | Valid key, but no route matches the path | `404` | `no route for path` | — |
 | Database unreachable during key lookup (lookups time out after 3s) | `503` | `authentication unavailable` | — |
 

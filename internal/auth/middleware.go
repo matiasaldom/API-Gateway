@@ -3,13 +3,13 @@ package auth
 import (
 	"context"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"api-gateway/internal/httpx"
 	"api-gateway/internal/requestid"
 )
 
@@ -23,6 +23,11 @@ type KeyStore interface {
 }
 
 type ctxKey struct{}
+
+// NewContext returns ctx carrying key's metadata, as Middleware does for authenticated requests.
+func NewContext(ctx context.Context, key APIKey) context.Context {
+	return context.WithValue(ctx, ctxKey{}, key)
+}
 
 // FromContext returns the authenticated key's metadata set by Middleware.
 func FromContext(ctx context.Context) (APIKey, bool) {
@@ -67,7 +72,7 @@ func Middleware(store KeyStore, logger *slog.Logger) func(http.Handler) http.Han
 				return
 			case err != nil:
 				log.ErrorContext(r.Context(), "api key lookup failed", "error", err.Error())
-				writeError(w, r, http.StatusServiceUnavailable, "authentication unavailable")
+				httpx.Error(w, r, http.StatusServiceUnavailable, "authentication unavailable")
 				return
 			}
 			// Defense in depth: the store matched on the hash; confirm it without a timing side channel.
@@ -78,14 +83,14 @@ func Middleware(store KeyStore, logger *slog.Logger) func(http.Handler) http.Han
 			}
 			if key.Status != StatusActive {
 				log.WarnContext(r.Context(), "authentication failed", "reason", "revoked_key", "api_key_id", key.ID)
-				writeError(w, r, http.StatusForbidden, "api key revoked")
+				httpx.Error(w, r, http.StatusForbidden, "api key revoked")
 				return
 			}
 
 			log.DebugContext(r.Context(), "authenticated",
 				"api_key_id", key.ID, "application_id", key.ApplicationID, "plan_id", key.PlanID)
 			r.Header.Del("Authorization")
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, key)))
+			next.ServeHTTP(w, r.WithContext(NewContext(r.Context(), key)))
 		})
 	}
 }
@@ -115,14 +120,5 @@ func unauthorized(w http.ResponseWriter, r *http.Request, invalidToken bool) {
 		msg = "invalid api key"
 	}
 	w.Header().Set("WWW-Authenticate", challenge)
-	writeError(w, r, http.StatusUnauthorized, msg)
-}
-
-func writeError(w http.ResponseWriter, r *http.Request, status int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"error":      msg,
-		"request_id": requestid.FromContext(r.Context()),
-	})
+	httpx.Error(w, r, http.StatusUnauthorized, msg)
 }

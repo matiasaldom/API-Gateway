@@ -14,6 +14,7 @@ import (
 
 	"api-gateway/internal/auth"
 	"api-gateway/internal/config"
+	"api-gateway/internal/limiter"
 	"api-gateway/internal/proxy"
 	"api-gateway/internal/storage"
 )
@@ -42,7 +43,10 @@ func run(configPath string, logger *slog.Logger) error {
 	defer db.Close()
 	logger.Info("database connected")
 
-	handler, err := proxy.NewHandler(cfg, logger, auth.Middleware(db, logger))
+	handler, err := proxy.NewHandler(cfg, logger,
+		auth.Middleware(db, logger),
+		limiter.Middleware(limiter.New(time.Now), logger),
+	)
 	if err != nil {
 		return err
 	}
