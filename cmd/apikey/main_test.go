@@ -76,7 +76,7 @@ func TestCreateListRevoke(t *testing.T) {
 	if err != nil || key.Status != auth.StatusActive {
 		t.Fatalf("created key not found as active: %+v, %v", key, err)
 	}
-	keys, err := db.ListAPIKeys(context.Background())
+	keys, err := db.ListAPIKeys(context.Background(), storage.KeyFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}

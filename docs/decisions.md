@@ -99,3 +99,34 @@ Future Consideration:
 - Retention job, or monthly partitions dropped on a schedule
 - Per-minute rollup tables if long-window queries become slow
 - Retry a failed batch once before dropping it
+
+ADR-005
+
+Routes are stored in PostgreSQL (routes table) so the admin
+API can edit them and the edits persist. gateway.yaml still
+decides which routes exist: at startup, new prefixes are
+inserted with their YAML values, prefixes missing from the
+YAML are deleted, and existing rows keep their stored
+upstream and cache TTL. The live route table is swapped
+atomically after an admin edit, so changes apply without a
+restart.
+
+Pros:
+- Route edits apply immediately and survive restarts
+- gateway.yaml keeps working as the declaration of routes and
+  the first set of values; no separate seeding step
+- Only one place defines route validation (the routing package)
+
+Cons:
+- After an admin edit, gateway.yaml no longer shows the real
+  upstream and TTL for that route (the gateway logs a warning
+  at startup when they differ)
+- Other gateway instances apply a route edit only when they
+  restart; plan limits, by contrast, apply everywhere immediately
+- Removing a route from gateway.yaml discards its stored edits
+
+Future Consideration:
+- Reload routes on a timer (or via LISTEN/NOTIFY) so every
+  instance applies edits without a restart
+- POST/DELETE /admin/routes if routes should be managed without
+  gateway.yaml at all

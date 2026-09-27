@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"api-gateway/internal/config"
@@ -106,8 +107,41 @@ func parseUpstream(raw string) (*url.URL, error) {
 	if u.Host == "" {
 		return nil, fmt.Errorf("upstream %q has no host", raw)
 	}
+	if u.User != nil {
+		return nil, fmt.Errorf("upstream %q must not contain credentials", raw)
+	}
 	if u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("upstream %q must not contain a query or fragment", raw)
 	}
 	return u, nil
+}
+
+// ValidateUpstream reports whether raw is a usable upstream base URL.
+func ValidateUpstream(raw string) error {
+	_, err := parseUpstream(raw)
+	return err
+}
+
+// Table holds the live Router. Readers get a consistent snapshot per call;
+// Replace swaps in a new route set atomically, without a restart.
+type Table struct {
+	current atomic.Pointer[Router]
+}
+
+func NewTable(r *Router) *Table {
+	t := &Table{}
+	t.current.Store(r)
+	return t
+}
+
+func (t *Table) Router() *Router   { return t.current.Load() }
+func (t *Table) Replace(r *Router) { t.current.Store(r) }
+
+func (t *Table) Match(path string) (Route, bool)    { return t.Router().Match(path) }
+func (t *Table) CacheTTL(path string) time.Duration { return t.Router().CacheTTL(path) }
+
+// RoutePrefix returns the prefix of the route matching path, or "" if none matches.
+func (t *Table) RoutePrefix(path string) string {
+	rt, _ := t.Router().Match(path)
+	return rt.Prefix
 }

@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"sync"
 	"time"
 
-	"api-gateway/internal/config"
 	"api-gateway/internal/httpx"
 	"api-gateway/internal/requestid"
 	"api-gateway/internal/routing"
@@ -19,8 +19,8 @@ import (
 const healthPath = "/health"
 
 type gateway struct {
-	router  *routing.Router
-	proxies map[string]*httputil.ReverseProxy // keyed by route prefix
+	routes  *routing.Table
+	proxies sync.Map // upstream URL string → *httputil.ReverseProxy
 	timeout time.Duration
 	logger  *slog.Logger
 }
@@ -29,27 +29,15 @@ type gateway struct {
 //
 //	request ID → access log → /health (public) | protect[0] → protect[1] → … → router → proxy
 //
-// protect runs in order on every non-health request; in production that is
-// authentication followed by rate limiting. At least one is required so the
-// gateway can't be built open by accident.
-func NewHandler(cfg *config.Config, logger *slog.Logger, protect ...func(http.Handler) http.Handler) (http.Handler, error) {
+// Routes are read from the live table on every request, so route changes made
+// through the admin API apply without a restart. protect runs in order on every
+// non-health request; at least one is required so the gateway can't be built
+// open by accident.
+func NewHandler(routes *routing.Table, upstreamTimeout time.Duration, logger *slog.Logger, protect ...func(http.Handler) http.Handler) (http.Handler, error) {
 	if len(protect) == 0 {
 		return nil, errors.New("at least one protecting middleware (authentication) is required")
 	}
-	router, err := routing.New(cfg.Routes)
-	if err != nil {
-		return nil, err
-	}
-
-	g := &gateway{
-		router:  router,
-		proxies: make(map[string]*httputil.ReverseProxy),
-		timeout: cfg.UpstreamTimeout,
-		logger:  logger,
-	}
-	for _, rt := range router.Routes() {
-		g.proxies[rt.Prefix] = g.newReverseProxy(rt.Target)
-	}
+	g := &gateway{routes: routes, timeout: upstreamTimeout, logger: logger}
 
 	var protected http.Handler = g
 	for i := len(protect) - 1; i >= 0; i-- {
@@ -68,7 +56,7 @@ func NewHandler(cfg *config.Config, logger *slog.Logger, protect ...func(http.Ha
 }
 
 func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	route, ok := g.router.Match(r.URL.Path)
+	route, ok := g.routes.Match(r.URL.Path)
 	if !ok {
 		httpx.Error(w, r, http.StatusNotFound, "no route for path")
 		return
@@ -76,7 +64,18 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), g.timeout)
 	defer cancel()
-	g.proxies[route.Prefix].ServeHTTP(w, r.WithContext(ctx))
+	g.proxyFor(route.Target).ServeHTTP(w, r.WithContext(ctx))
+}
+
+// proxyFor returns the reverse proxy for target, creating it on first use.
+// Proxies share http.DefaultTransport, so connection pooling is per upstream host.
+func (g *gateway) proxyFor(target *url.URL) *httputil.ReverseProxy {
+	key := target.String()
+	if p, ok := g.proxies.Load(key); ok {
+		return p.(*httputil.ReverseProxy)
+	}
+	p, _ := g.proxies.LoadOrStore(key, g.newReverseProxy(target))
+	return p.(*httputil.ReverseProxy)
 }
 
 func (g *gateway) newReverseProxy(target *url.URL) *httputil.ReverseProxy {

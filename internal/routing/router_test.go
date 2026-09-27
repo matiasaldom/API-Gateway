@@ -81,15 +81,16 @@ func TestRootPrefixIsCatchAll(t *testing.T) {
 
 func TestNewRejectsInvalidRoutes(t *testing.T) {
 	tests := map[string][]config.Route{
-		"no routes":           nil,
-		"relative prefix":     {{Prefix: "users", Upstream: "http://a"}},
-		"duplicate prefix":    {{Prefix: "/users", Upstream: "http://a"}, {Prefix: "/users/", Upstream: "http://b"}},
-		"missing scheme":      {{Prefix: "/users", Upstream: "localhost:8081"}},
-		"unsupported scheme":  {{Prefix: "/users", Upstream: "ftp://a"}},
-		"missing host":        {{Prefix: "/users", Upstream: "http://"}},
-		"query in upstream":   {{Prefix: "/users", Upstream: "http://a?x=1"}},
-		"negative cache ttl":  {{Prefix: "/users", Upstream: "http://a", CacheTTL: -time.Second}},
-		"unparseable address": {{Prefix: "/users", Upstream: "http://a b"}},
+		"no routes":               nil,
+		"relative prefix":         {{Prefix: "users", Upstream: "http://a"}},
+		"duplicate prefix":        {{Prefix: "/users", Upstream: "http://a"}, {Prefix: "/users/", Upstream: "http://b"}},
+		"missing scheme":          {{Prefix: "/users", Upstream: "localhost:8081"}},
+		"unsupported scheme":      {{Prefix: "/users", Upstream: "ftp://a"}},
+		"missing host":            {{Prefix: "/users", Upstream: "http://"}},
+		"query in upstream":       {{Prefix: "/users", Upstream: "http://a?x=1"}},
+		"negative cache ttl":      {{Prefix: "/users", Upstream: "http://a", CacheTTL: -time.Second}},
+		"credentials in upstream": {{Prefix: "/users", Upstream: "http://user:pw@a"}},
+		"unparseable address":     {{Prefix: "/users", Upstream: "http://a b"}},
 	}
 	for name, routes := range tests {
 		if _, err := New(routes); err == nil {

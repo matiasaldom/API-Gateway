@@ -38,10 +38,12 @@ type authEnv struct {
 	gatewayURL string
 	logs       *syncBuffer
 
-	upstreamCalls *atomic.Int64 // requests that reached the backend
-	cache         *cache.Cache
-	cacheClock    *testClock
-	collector     *metrics.Collector
+	upstreamCalls  *atomic.Int64 // requests that reached the backend
+	cache          *cache.Cache
+	cacheClock     *testClock
+	collector      *metrics.Collector
+	routes         *routing.Table // live route table, editable through the admin API
+	declaredRoutes []config.Route // the env's "gateway.yaml"
 }
 
 // flushAnalytics stops the collector, writing every pending event.
@@ -109,10 +111,21 @@ func newAuthEnvWithWriter(t *testing.T, w metrics.EventWriter) authEnv {
 		{Prefix: "/users", Upstream: upstream.URL},
 		{Prefix: "/albums", Upstream: upstream.URL, CacheTTL: 30 * time.Second},
 	}
-	router, err := routing.New(routes)
+	// Routes go through the database exactly as in cmd/gateway: declared, synced, loaded into a live table.
+	env.declaredRoutes = routes
+	declared, err := routing.New(routes)
 	if err != nil {
 		t.Fatal(err)
 	}
+	records, err := db.SyncRoutes(ctx, declared.Routes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	router, err := routing.New(storage.RouteConfigs(records))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.routes = routing.NewTable(router)
 
 	if w == nil {
 		w = db
@@ -126,14 +139,13 @@ func newAuthEnvWithWriter(t *testing.T, w metrics.EventWriter) authEnv {
 	frozen := time.Date(2026, 9, 26, 12, 0, 30, 0, time.UTC)
 	env.cacheClock = &testClock{t: frozen}
 	env.cache = cache.New(16<<20, env.cacheClock.Now)
-	h, err := proxy.NewHandler(
-		&config.Config{UpstreamTimeout: 5 * time.Second, Routes: routes},
+	h, err := proxy.NewHandler(env.routes, 5*time.Second,
 		logger,
-		metrics.Middleware(env.collector, func(p string) string { rt, _ := router.Match(p); return rt.Prefix }),
+		metrics.Middleware(env.collector, env.routes.RoutePrefix),
 		auth.Middleware(db, logger),
 		metrics.Identify,
 		limiter.Middleware(limiter.New(func() time.Time { return frozen }), logger),
-		cache.Middleware(env.cache, router.CacheTTL),
+		cache.Middleware(env.cache, env.routes.CacheTTL),
 	)
 	if err != nil {
 		t.Fatal(err)

@@ -49,7 +49,8 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" "http://localhost:8080/analytics/su
 
 - **No token set:** if `ADMIN_TOKEN` is unset, `/analytics/*` isn't served at all, and the gateway logs a warning at startup.
 - **Token too short:** a token under 32 characters stops the gateway at startup.
-- **Wrong or missing token:** the request gets `401`.
+- **Wrong or missing token:** a missing token gets `401` and a wrong one gets `403`.
+- **Also under `/admin/analytics/*`:** the same endpoints are served there. See [admin-api.md](admin-api.md).
 
 Every endpoint accepts `?window=` with a Go duration (`15m`, `24h`, `168h`). The default is `1h` and the maximum `744h` (31 days). Every response includes the `window`, `from` and `to` it covers.
 

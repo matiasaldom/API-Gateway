@@ -98,7 +98,7 @@ func run(ctx context.Context, args []string, databaseURL string, out io.Writer) 
 			return err
 		}
 		exec = func(db *storage.DB) error {
-			keys, err := db.ListAPIKeys(ctx)
+			keys, err := db.ListAPIKeys(ctx, storage.KeyFilter{})
 			if err != nil {
 				return err
 			}

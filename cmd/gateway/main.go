@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"api-gateway/internal/admin"
 	"api-gateway/internal/auth"
 	"api-gateway/internal/cache"
 	"api-gateway/internal/config"
@@ -52,11 +53,30 @@ func run(configPath string, logger *slog.Logger) error {
 	defer db.Close()
 	logger.Info("database connected")
 
-	// The cache resolves each path's TTL from the same route table the router uses.
-	routes, err := routing.New(cfg.Routes)
+	// gateway.yaml declares which routes exist; the database holds their managed
+	// upstream and cache TTL (editable via the admin API). The live table is what
+	// the router, cache, and analytics read on every request.
+	declared, err := routing.New(cfg.Routes)
 	if err != nil {
 		return err
 	}
+	records, err := db.SyncRoutes(context.Background(), declared.Routes())
+	if err != nil {
+		return err
+	}
+	for _, d := range declared.Routes() {
+		for _, rec := range records {
+			if rec.Prefix == d.Prefix && (rec.Upstream != d.Target.String() || rec.CacheTTL != d.CacheTTL) {
+				logger.Warn("route settings differ from gateway.yaml; using managed values from the database",
+					"prefix", rec.Prefix, "upstream", rec.Upstream, "cache_ttl", rec.CacheTTL.String())
+			}
+		}
+	}
+	router, err := routing.New(storage.RouteConfigs(records))
+	if err != nil {
+		return fmt.Errorf("stored routes: %w", err)
+	}
+	routes := routing.NewTable(router)
 	responseCache := cache.New(cacheMaxBytes, time.Now)
 
 	// Analytics events are written to PostgreSQL by a background worker.
@@ -72,13 +92,9 @@ func run(configPath string, logger *slog.Logger) error {
 		s := collector.Stats()
 		logger.Info("analytics collector stopped", "written", s.Written, "failed", s.Failed, "dropped", s.Dropped)
 	}()
-	routeFor := func(path string) string {
-		rt, _ := routes.Match(path)
-		return rt.Prefix
-	}
 
-	handler, err := proxy.NewHandler(cfg, logger,
-		metrics.Middleware(collector, routeFor), // first: times and counts everything, including auth failures
+	handler, err := proxy.NewHandler(routes, cfg.UpstreamTimeout, logger,
+		metrics.Middleware(collector, routes.RoutePrefix), // first: times and counts everything, including auth failures
 		auth.Middleware(db, logger),
 		metrics.Identify, // records the authenticated key on the analytics event
 		limiter.Middleware(limiter.New(time.Now), logger),
@@ -88,24 +104,24 @@ func run(configPath string, logger *slog.Logger) error {
 		return err
 	}
 
-	// /metrics and /analytics sit outside the API-key pipeline, like /health.
+	// /metrics, /admin, and /analytics sit outside the API-key pipeline, like /health.
 	cacheMetrics := responseCache.MetricsHandler()
-	var analytics http.Handler
+	var adminAPI http.Handler
 	if cfg.AdminToken != "" {
-		h, err := metrics.AnalyticsHandler(db, collector, cfg.AdminToken, logger)
+		h, err := admin.New(db, routes, metrics.NewAnalytics(db, collector, logger), cfg.AdminToken, logger)
 		if err != nil {
 			return fmt.Errorf("ADMIN_TOKEN: %w", err)
 		}
-		analytics = requestid.Middleware(proxy.AccessLog(logger, h))
+		adminAPI = requestid.Middleware(proxy.AccessLog(logger, h))
 	} else {
-		logger.Warn("analytics endpoints disabled: ADMIN_TOKEN is not set")
+		logger.Warn("admin and analytics endpoints disabled: ADMIN_TOKEN is not set")
 	}
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/metrics" && r.Method == http.MethodGet:
 			cacheMetrics.ServeHTTP(w, r)
-		case analytics != nil && strings.HasPrefix(r.URL.Path, "/analytics/"):
-			analytics.ServeHTTP(w, r)
+		case adminAPI != nil && (strings.HasPrefix(r.URL.Path, "/admin/") || strings.HasPrefix(r.URL.Path, "/analytics/")):
+			adminAPI.ServeHTTP(w, r)
 		default:
 			handler.ServeHTTP(w, r)
 		}

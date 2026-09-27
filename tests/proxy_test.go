@@ -15,6 +15,7 @@ import (
 	"api-gateway/internal/config"
 	"api-gateway/internal/proxy"
 	"api-gateway/internal/requestid"
+	"api-gateway/internal/routing"
 )
 
 // echo is what the upstream test server reports back about the request it received.
@@ -59,7 +60,11 @@ func newGateway(t *testing.T, timeout time.Duration, logs io.Writer, routes ...c
 	if logs == nil {
 		logs = io.Discard
 	}
-	h, err := proxy.NewHandler(&config.Config{UpstreamTimeout: timeout, Routes: routes}, slog.New(slog.NewJSONHandler(logs, nil)), noAuth)
+	router, err := routing.New(routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := proxy.NewHandler(routing.NewTable(router), timeout, slog.New(slog.NewJSONHandler(logs, nil)), noAuth)
 	if err != nil {
 		t.Fatal(err)
 	}

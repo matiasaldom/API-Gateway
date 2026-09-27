@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"api-gateway/internal/admin"
 	"api-gateway/internal/metrics"
 	"api-gateway/internal/storage"
 	"api-gateway/internal/testdb"
@@ -22,7 +23,7 @@ const testAdminToken = "test-admin-token-0123456789abcdef"
 // queryAnalytics calls an analytics endpoint on env's database and decodes the JSON body into out.
 func queryAnalytics(t *testing.T, env authEnv, path string, out any) {
 	t.Helper()
-	h, err := metrics.AnalyticsHandler(env.db, env.collector, testAdminToken, slog.New(slog.DiscardHandler))
+	h, err := admin.New(env.db, env.routes, metrics.NewAnalytics(env.db, env.collector, slog.New(slog.DiscardHandler)), testAdminToken, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}

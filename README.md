@@ -43,7 +43,7 @@ docker run ...
 
 DATABASE_URL=...
 
-ADMIN_TOKEN=$(openssl rand -hex 32)   # optional: enables /analytics/*
+ADMIN_TOKEN=$(openssl rand -hex 32)   # optional: enables /admin/* and /analytics/*
 
 ### Apply Migrations
 
@@ -57,12 +57,17 @@ go run ./cmd/gateway
 
 go run ./cmd/apikey create -email dev@example.com -app "My App"
 
+or, with the gateway running and ADMIN_TOKEN set:
+
+curl -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" -d '{"email":"dev@example.com","application":"My App"}' http://localhost:8080/admin/api-keys
+
 curl http://localhost:8080/users/1 -H "Authorization: Bearer <key>"
 
 See [docs/authentication.md](docs/authentication.md) for key management, error responses, and logging,
 [docs/rate-limiting.md](docs/rate-limiting.md) for plan limits and rate-limit headers,
 [docs/caching.md](docs/caching.md) for per-route response caching,
-and [docs/analytics.md](docs/analytics.md) for analytics collection and endpoints.
+[docs/analytics.md](docs/analytics.md) for analytics collection and endpoints,
+and [docs/admin-api.md](docs/admin-api.md) for managing keys, plans, and routes over HTTP.
 
 ## Health Check & Metrics
 
@@ -86,7 +91,8 @@ go test ./...
 - [x] Rate limiting (fixed window, in-memory)
 - [x] Response caching (in-memory, per API key)
 - [x] Analytics (async collection, admin endpoints)
-- [ ] Management API
+- [x] Management API (keys, plans, routes, analytics)
+- [ ] Dashboard
 
 ## Current Status
 
@@ -98,9 +104,10 @@ Completed:
 - Per-plan fixed window rate limiting
 - Per-route response caching
 - Asynchronous analytics with admin endpoints
+- Management API (API keys, plan limits, live route edits)
 - Request ID tracing
 - Structured logging
 - Integration tests
 
 Next:
-- Management API
+- Dashboard

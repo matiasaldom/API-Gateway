@@ -2,12 +2,8 @@ package metrics
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
-	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"api-gateway/internal/httpx"
@@ -18,8 +14,6 @@ const (
 	defaultWindow = time.Hour
 	maxWindow     = 31 * 24 * time.Hour
 	queryTimeout  = 10 * time.Second
-	// MinAdminTokenLen guards against guessable admin tokens (e.g. `openssl rand -hex 32` gives 64).
-	MinAdminTokenLen = 32
 )
 
 // Latency percentiles in milliseconds.
@@ -88,88 +82,83 @@ type window struct {
 	To     time.Time `json:"to"`
 }
 
-// AnalyticsHandler serves, to callers presenting adminToken as a Bearer token:
+// Analytics serves aggregated analytics as JSON. It performs no authentication:
+// mount it behind admin.RequireToken, because the data spans all accounts.
 //
-//	GET /analytics/summary   engineering totals and latency percentiles, plus collector health
-//	GET /analytics/routes    the same, per route
-//	GET /analytics/accounts  requests per application and per API key, with plan utilization
-//
-// Each accepts ?window=<duration> (default 1h, max 744h). The data spans all
-// accounts, so API keys are not accepted here.
-func AnalyticsHandler(q Querier, c *Collector, adminToken string, logger *slog.Logger) (http.Handler, error) {
-	if len(adminToken) < MinAdminTokenLen {
-		return nil, errors.New("admin token must be at least 32 characters")
+// Each endpoint accepts ?window=<duration> (default 1h, max 744h).
+type Analytics struct {
+	q      Querier
+	c      *Collector
+	logger *slog.Logger
+}
+
+func NewAnalytics(q Querier, c *Collector, logger *slog.Logger) *Analytics {
+	return &Analytics{q: q, c: c, logger: logger}
+}
+
+// Summary serves engineering totals and latency percentiles, plus collector health.
+func (a *Analytics) Summary(w http.ResponseWriter, r *http.Request) {
+	a.serve(w, r, func(ctx context.Context, win window) (any, error) {
+		t, err := a.q.Summary(ctx, win.From)
+		return struct {
+			window
+			Traffic
+			Collector CollectorStats `json:"collector"`
+		}{win, t, a.c.Stats()}, err
+	})
+}
+
+// Routes serves the summary numbers per route.
+func (a *Analytics) Routes(w http.ResponseWriter, r *http.Request) {
+	a.serve(w, r, func(ctx context.Context, win window) (any, error) {
+		routes, err := a.q.Routes(ctx, win.From)
+		return struct {
+			window
+			Routes []RouteStats `json:"routes"`
+		}{win, nonNil(routes)}, err
+	})
+}
+
+// Accounts serves requests per application and per API key, with plan utilization.
+func (a *Analytics) Accounts(w http.ResponseWriter, r *http.Request) {
+	a.serve(w, r, func(ctx context.Context, win window) (any, error) {
+		acc, err := a.q.Accounts(ctx, win.From)
+		acc.Applications, acc.APIKeys = nonNil(acc.Applications), nonNil(acc.APIKeys)
+		return struct {
+			window
+			Accounts
+		}{win, acc}, err
+	})
+}
+
+func (a *Analytics) serve(w http.ResponseWriter, r *http.Request, query func(context.Context, window) (any, error)) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
+		return
 	}
-	want := sha256.Sum256([]byte(adminToken))
+	d := defaultWindow
+	if v := r.URL.Query().Get("window"); v != "" {
+		parsed, err := time.ParseDuration(v)
+		if err != nil || parsed <= 0 || parsed > maxWindow {
+			httpx.Error(w, r, http.StatusBadRequest, "window must be a duration between 1ns and 744h, e.g. 15m or 24h")
+			return
+		}
+		d = parsed
+	}
+	now := time.Now().UTC()
+	win := window{Window: d.String(), From: now.Add(-d), To: now}
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		scheme, token, _ := strings.Cut(r.Header.Get("Authorization"), " ")
-		got := sha256.Sum256([]byte(token)) // hash both sides: constant time regardless of length
-		if !strings.EqualFold(scheme, "Bearer") || subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
-			logger.WarnContext(r.Context(), "analytics access denied",
-				"request_id", requestid.FromContext(r.Context()), "path", r.URL.Path, "remote_addr", r.RemoteAddr)
-			w.Header().Set("WWW-Authenticate", `Bearer realm="analytics"`)
-			httpx.Error(w, r, http.StatusUnauthorized, "admin token required")
-			return
-		}
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
-			httpx.Error(w, r, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		d := defaultWindow
-		if v := r.URL.Query().Get("window"); v != "" {
-			parsed, err := time.ParseDuration(v)
-			if err != nil || parsed <= 0 || parsed > maxWindow {
-				httpx.Error(w, r, http.StatusBadRequest, "window must be a duration between 1ns and 744h, e.g. 15m or 24h")
-				return
-			}
-			d = parsed
-		}
-		now := time.Now().UTC()
-		win := window{Window: d.String(), From: now.Add(-d), To: now}
-
-		ctx, cancel := context.WithTimeout(r.Context(), queryTimeout)
-		defer cancel()
-		var body any
-		var err error
-		switch r.URL.Path {
-		case "/analytics/summary":
-			var t Traffic
-			t, err = q.Summary(ctx, win.From)
-			body = struct {
-				window
-				Traffic
-				Collector CollectorStats `json:"collector"`
-			}{win, t, c.Stats()}
-		case "/analytics/routes":
-			var routes []RouteStats
-			routes, err = q.Routes(ctx, win.From)
-			body = struct {
-				window
-				Routes []RouteStats `json:"routes"`
-			}{win, nonNil(routes)}
-		case "/analytics/accounts":
-			var a Accounts
-			a, err = q.Accounts(ctx, win.From)
-			a.Applications, a.APIKeys = nonNil(a.Applications), nonNil(a.APIKeys)
-			body = struct {
-				window
-				Accounts
-			}{win, a}
-		default:
-			httpx.Error(w, r, http.StatusNotFound, "unknown analytics endpoint")
-			return
-		}
-		if err != nil {
-			logger.ErrorContext(r.Context(), "analytics query failed",
-				"request_id", requestid.FromContext(r.Context()), "path", r.URL.Path, "error", err.Error())
-			httpx.Error(w, r, http.StatusInternalServerError, "analytics query failed")
-			return
-		}
-		httpx.JSON(w, http.StatusOK, body)
-	}), nil
+	ctx, cancel := context.WithTimeout(r.Context(), queryTimeout)
+	defer cancel()
+	body, err := query(ctx, win)
+	if err != nil {
+		a.logger.ErrorContext(r.Context(), "analytics query failed",
+			"request_id", requestid.FromContext(r.Context()), "path", r.URL.Path, "error", err.Error())
+		httpx.Error(w, r, http.StatusInternalServerError, "analytics query failed")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, body)
 }
 
 // nonNil makes empty results encode as [] rather than null.

@@ -11,8 +11,6 @@ import (
 	"time"
 )
 
-const adminToken = "0123456789abcdef0123456789abcdef"
-
 type fakeQuerier struct {
 	since time.Time
 	err   error
@@ -34,54 +32,29 @@ func (f *fakeQuerier) Accounts(_ context.Context, since time.Time) (Accounts, er
 	return Accounts{}, f.err // nil slices must encode as []
 }
 
-func analyticsHandler(t *testing.T, q Querier) http.Handler {
+func analyticsMux(t *testing.T, q Querier) http.Handler {
 	t.Helper()
 	c := NewCollector(&fakeWriter{}, discard, Options{})
 	t.Cleanup(func() { _ = c.Close(context.Background()) })
-	h, err := AnalyticsHandler(q, c, adminToken, discard)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return h
+	a := NewAnalytics(q, c, discard)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/analytics/summary", a.Summary)
+	mux.HandleFunc("/analytics/routes", a.Routes)
+	mux.HandleFunc("/analytics/accounts", a.Accounts)
+	return mux
 }
 
-func call(h http.Handler, method, target, authz string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(method, target, nil)
-	if authz != "" {
-		req.Header.Set("Authorization", authz)
-	}
+func call(h http.Handler, method, target string) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, httptest.NewRequest(method, target, nil))
 	return rec
-}
-
-func TestAnalyticsRejectsWeakToken(t *testing.T) {
-	if _, err := AnalyticsHandler(&fakeQuerier{}, nil, "short", discard); err == nil {
-		t.Error("expected error for an admin token under 32 characters")
-	}
-}
-
-func TestAnalyticsRequiresAdminToken(t *testing.T) {
-	h := analyticsHandler(t, &fakeQuerier{})
-	for name, authz := range map[string]string{
-		"missing":      "",
-		"wrong token":  "Bearer " + strings.Repeat("x", 32),
-		"prefix only":  "Bearer " + adminToken[:31],
-		"wrong scheme": "Basic " + adminToken,
-		"an api key":   "Bearer gw_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-	} {
-		if rec := call(h, http.MethodGet, "/analytics/summary", authz); rec.Code != http.StatusUnauthorized {
-			t.Errorf("%s: status %d, want 401", name, rec.Code)
-		}
-	}
 }
 
 func TestAnalyticsEndpoints(t *testing.T) {
 	q := &fakeQuerier{}
-	h := analyticsHandler(t, q)
-	authz := "Bearer " + adminToken
+	h := analyticsMux(t, q)
 
-	rec := call(h, http.MethodGet, "/analytics/summary?window=15m", authz)
+	rec := call(h, http.MethodGet, "/analytics/summary?window=15m")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("summary: %d %s", rec.Code, rec.Body)
 	}
@@ -97,37 +70,35 @@ func TestAnalyticsEndpoints(t *testing.T) {
 		t.Errorf("query since %s ago, want the 15m window", d)
 	}
 
-	rec = call(h, http.MethodGet, "/analytics/routes", authz)
+	rec = call(h, http.MethodGet, "/analytics/routes")
 	if !strings.Contains(rec.Body.String(), `"route":"/users"`) || !strings.Contains(rec.Body.String(), `"route":null`) ||
 		!strings.Contains(rec.Body.String(), `"window":"1h0m0s"`) {
 		t.Errorf("routes body = %s", rec.Body)
 	}
 
-	rec = call(h, http.MethodGet, "/analytics/accounts", authz)
+	rec = call(h, http.MethodGet, "/analytics/accounts")
 	if !strings.Contains(rec.Body.String(), `"applications":[]`) || !strings.Contains(rec.Body.String(), `"api_keys":[]`) {
 		t.Errorf("accounts body = %s", rec.Body)
 	}
 }
 
 func TestAnalyticsErrors(t *testing.T) {
-	authz := "Bearer " + adminToken
-	h := analyticsHandler(t, &fakeQuerier{})
+	h := analyticsMux(t, &fakeQuerier{})
 	for target, want := range map[string]int{
 		"/analytics/summary?window=soon": http.StatusBadRequest,
 		"/analytics/summary?window=-1h":  http.StatusBadRequest,
 		"/analytics/summary?window=800h": http.StatusBadRequest,
-		"/analytics/nope":                http.StatusNotFound,
 	} {
-		if rec := call(h, http.MethodGet, target, authz); rec.Code != want {
+		if rec := call(h, http.MethodGet, target); rec.Code != want {
 			t.Errorf("GET %s: status %d, want %d", target, rec.Code, want)
 		}
 	}
-	if rec := call(h, http.MethodPost, "/analytics/summary", authz); rec.Code != http.StatusMethodNotAllowed {
+	if rec := call(h, http.MethodPost, "/analytics/summary"); rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST: status %d, want 405", rec.Code)
 	}
 
-	failing := analyticsHandler(t, &fakeQuerier{err: errors.New("db down")})
-	rec := call(failing, http.MethodGet, "/analytics/summary", authz)
+	failing := analyticsMux(t, &fakeQuerier{err: errors.New("db down")})
+	rec := call(failing, http.MethodGet, "/analytics/summary")
 	if rec.Code != http.StatusInternalServerError || strings.Contains(rec.Body.String(), "db down") {
 		t.Errorf("query failure: status %d body %s (internal errors must not leak)", rec.Code, rec.Body)
 	}
