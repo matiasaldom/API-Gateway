@@ -19,6 +19,7 @@ import (
 	"api-gateway/internal/cache"
 	"api-gateway/internal/config"
 	"api-gateway/internal/limiter"
+	"api-gateway/internal/metrics"
 	"api-gateway/internal/proxy"
 	"api-gateway/internal/requestid"
 	"api-gateway/internal/routing"
@@ -40,6 +41,17 @@ type authEnv struct {
 	upstreamCalls *atomic.Int64 // requests that reached the backend
 	cache         *cache.Cache
 	cacheClock    *testClock
+	collector     *metrics.Collector
+}
+
+// flushAnalytics stops the collector, writing every pending event.
+func (e authEnv) flushAnalytics(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := e.collector.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // testClock is a settable time source.
@@ -52,6 +64,12 @@ func (c *testClock) Now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); ret
 func (c *testClock) Add(d time.Duration) { c.mu.Lock(); defer c.mu.Unlock(); c.t = c.t.Add(d) }
 
 func newAuthEnv(t *testing.T) authEnv {
+	t.Helper()
+	return newAuthEnvWithWriter(t, nil)
+}
+
+// newAuthEnvWithWriter sends analytics events to w instead of the env's database (nil: the database).
+func newAuthEnvWithWriter(t *testing.T, w metrics.EventWriter) authEnv {
 	t.Helper()
 	ctx := context.Background()
 	env := authEnv{dbURL: testdb.URL(t), logs: &syncBuffer{}}
@@ -96,6 +114,12 @@ func newAuthEnv(t *testing.T) authEnv {
 		t.Fatal(err)
 	}
 
+	if w == nil {
+		w = db
+	}
+	env.collector = metrics.NewCollector(w, logger, metrics.Options{FlushInterval: 10 * time.Millisecond})
+	t.Cleanup(func() { _ = env.collector.Close(context.Background()) })
+
 	// Same chain as cmd/gateway. The limiter clock is frozen mid-window so
 	// rate-limit tests can't straddle a minute boundary and flake; the cache
 	// clock is advanced by tests to expire entries.
@@ -105,7 +129,9 @@ func newAuthEnv(t *testing.T) authEnv {
 	h, err := proxy.NewHandler(
 		&config.Config{UpstreamTimeout: 5 * time.Second, Routes: routes},
 		logger,
+		metrics.Middleware(env.collector, func(p string) string { rt, _ := router.Match(p); return rt.Prefix }),
 		auth.Middleware(db, logger),
+		metrics.Identify,
 		limiter.Middleware(limiter.New(func() time.Time { return frozen }), logger),
 		cache.Middleware(env.cache, router.CacheTTL),
 	)

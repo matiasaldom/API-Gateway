@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,7 +17,9 @@ import (
 	"api-gateway/internal/cache"
 	"api-gateway/internal/config"
 	"api-gateway/internal/limiter"
+	"api-gateway/internal/metrics"
 	"api-gateway/internal/proxy"
+	"api-gateway/internal/requestid"
 	"api-gateway/internal/routing"
 	"api-gateway/internal/storage"
 )
@@ -56,8 +59,28 @@ func run(configPath string, logger *slog.Logger) error {
 	}
 	responseCache := cache.New(cacheMaxBytes, time.Now)
 
+	// Analytics events are written to PostgreSQL by a background worker.
+	// Deferred after db.Close, so it runs first: pending events are flushed
+	// (after srv.Shutdown has drained in-flight requests) before the pool closes.
+	collector := metrics.NewCollector(db, logger, metrics.Options{})
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := collector.Close(ctx); err != nil {
+			logger.Error("analytics flush on shutdown", "error", err.Error())
+		}
+		s := collector.Stats()
+		logger.Info("analytics collector stopped", "written", s.Written, "failed", s.Failed, "dropped", s.Dropped)
+	}()
+	routeFor := func(path string) string {
+		rt, _ := routes.Match(path)
+		return rt.Prefix
+	}
+
 	handler, err := proxy.NewHandler(cfg, logger,
+		metrics.Middleware(collector, routeFor), // first: times and counts everything, including auth failures
 		auth.Middleware(db, logger),
+		metrics.Identify, // records the authenticated key on the analytics event
 		limiter.Middleware(limiter.New(time.Now), logger),
 		cache.Middleware(responseCache, routes.CacheTTL),
 	)
@@ -65,14 +88,27 @@ func run(configPath string, logger *slog.Logger) error {
 		return err
 	}
 
-	// /metrics sits outside the request pipeline, like /health: no auth, no access log per scrape.
-	metrics := responseCache.MetricsHandler()
-	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/metrics" && r.Method == http.MethodGet {
-			metrics.ServeHTTP(w, r)
-			return
+	// /metrics and /analytics sit outside the API-key pipeline, like /health.
+	cacheMetrics := responseCache.MetricsHandler()
+	var analytics http.Handler
+	if cfg.AdminToken != "" {
+		h, err := metrics.AnalyticsHandler(db, collector, cfg.AdminToken, logger)
+		if err != nil {
+			return fmt.Errorf("ADMIN_TOKEN: %w", err)
 		}
-		handler.ServeHTTP(w, r)
+		analytics = requestid.Middleware(proxy.AccessLog(logger, h))
+	} else {
+		logger.Warn("analytics endpoints disabled: ADMIN_TOKEN is not set")
+	}
+	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/metrics" && r.Method == http.MethodGet:
+			cacheMetrics.ServeHTTP(w, r)
+		case analytics != nil && strings.HasPrefix(r.URL.Path, "/analytics/"):
+			analytics.ServeHTTP(w, r)
+		default:
+			handler.ServeHTTP(w, r)
+		}
 	})
 
 	srv := &http.Server{

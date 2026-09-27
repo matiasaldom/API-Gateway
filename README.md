@@ -8,6 +8,7 @@ A high-performance API Gateway written in Go.
 - API key authentication
 - Per-plan rate limiting (fixed window)
 - Per-route response caching (in-memory, per API key)
+- Asynchronous request analytics (PostgreSQL, admin endpoints)
 - PostgreSQL-backed identity storage
 - Request tracing IDs
 - Structured logging
@@ -17,6 +18,7 @@ A high-performance API Gateway written in Go.
 
 Client
 → Gateway
+→ Analytics (async event → PostgreSQL)
 → Authentication
 → Rate Limiting
 → Cache
@@ -41,6 +43,8 @@ docker run ...
 
 DATABASE_URL=...
 
+ADMIN_TOKEN=$(openssl rand -hex 32)   # optional: enables /analytics/*
+
 ### Apply Migrations
 
 for f in migrations/*.up.sql; do psql "$DATABASE_URL" -f "$f"; done
@@ -57,13 +61,17 @@ curl http://localhost:8080/users/1 -H "Authorization: Bearer <key>"
 
 See [docs/authentication.md](docs/authentication.md) for key management, error responses, and logging,
 [docs/rate-limiting.md](docs/rate-limiting.md) for plan limits and rate-limit headers,
-and [docs/caching.md](docs/caching.md) for per-route response caching.
+[docs/caching.md](docs/caching.md) for per-route response caching,
+and [docs/analytics.md](docs/analytics.md) for analytics collection and endpoints.
 
 ## Health Check & Metrics
 
 curl http://localhost:8080/health
 
 curl http://localhost:8080/metrics   # cache_hits, cache_misses, cache_entries, cache_bytes
+
+curl -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:8080/analytics/summary?window=24h
+# also /analytics/routes and /analytics/accounts
 
 ## Tests
 
@@ -77,7 +85,7 @@ go test ./...
 - [x] PostgreSQL persistence
 - [x] Rate limiting (fixed window, in-memory)
 - [x] Response caching (in-memory, per API key)
-- [ ] Analytics
+- [x] Analytics (async collection, admin endpoints)
 - [ ] Management API
 
 ## Current Status
@@ -89,9 +97,10 @@ Completed:
 - API key creation, revocation, and listing CLI
 - Per-plan fixed window rate limiting
 - Per-route response caching
+- Asynchronous analytics with admin endpoints
 - Request ID tracing
 - Structured logging
 - Integration tests
 
-In Progress:
-- Analytics
+Next:
+- Management API

@@ -22,6 +22,8 @@ type Config struct {
 
 	// DatabaseURL comes from the DATABASE_URL environment variable so credentials stay out of the config file.
 	DatabaseURL string `yaml:"-"`
+	// AdminToken (ADMIN_TOKEN) guards /analytics/*; when empty those endpoints are not served.
+	AdminToken string `yaml:"-"`
 }
 
 // Route maps a path prefix to an upstream base URL.
@@ -58,5 +60,6 @@ func Load(path string) (*Config, error) {
 		cfg.UpstreamTimeout = DefaultUpstreamTimeout
 	}
 	cfg.DatabaseURL = os.Getenv("DATABASE_URL")
+	cfg.AdminToken = os.Getenv("ADMIN_TOKEN")
 	return &cfg, nil
 }

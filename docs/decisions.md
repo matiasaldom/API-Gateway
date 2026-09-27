@@ -68,3 +68,34 @@ Future Consideration:
 - Combine concurrent misses for the same key (singleflight)
 - LRU eviction if the memory cap is reached in practice
 - Shared cache (e.g. Redis) once the gateway runs multiple instances
+
+ADR-004
+
+Analytics stores one raw event per request in PostgreSQL
+(request_events). Events are emitted after the response into
+a bounded buffer, then batch-written by one background worker
+using COPY. Totals are computed when an endpoint is queried,
+not stored ahead of time.
+
+Pros:
+- Requests never wait for the database; a full buffer drops
+  events and counts them instead of adding latency
+- Writer errors and panics are contained in the worker
+- Raw events answer any breakdown (route, key, plan, status)
+  without deciding the questions up front
+- Exact percentiles from percentile_cont
+- Shutdown writes pending events after in-flight requests finish
+
+Cons:
+- Events can be lost when the buffer overflows, a write fails,
+  or the process crashes; this is acceptable for analytics,
+  not for billing
+- Table grows without limit until a retention job is added
+- Query cost grows with the window; long windows over large
+  tables scan many rows
+- 429/504 from backends count the same as the gateway's own
+
+Future Consideration:
+- Retention job, or monthly partitions dropped on a schedule
+- Per-minute rollup tables if long-window queries become slow
+- Retry a failed batch once before dropping it
