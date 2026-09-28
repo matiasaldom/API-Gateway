@@ -16,7 +16,8 @@ import (
 // run after auth.Middleware: entries are scoped to the authenticated API key,
 // and requests without one are never cached.
 //
-// Responses carry X-Cache: HIT or MISS when the cache was consulted, and Age on hits.
+// Responses carry X-Cache: HIT or MISS when the cache was consulted, BYPASS when
+// the request's Cache-Control (no-cache or no-store) skipped it, and Age on hits.
 func Middleware(c *Cache, ttlFor func(path string) time.Duration) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -32,19 +33,28 @@ func Middleware(c *Cache, ttlFor func(path string) time.Duration) func(http.Hand
 			}
 
 			k := KeyFor(r, apiKey.ID)
-			if resp, ok := c.Get(k); ok {
-				h := w.Header()
-				for name, vals := range resp.Header {
-					h[name] = slices.Clone(vals)
+			// A client can skip its own cached copy: no-cache fetches fresh and
+			// refreshes the entry, no-store fetches fresh and stores nothing.
+			// Entries are per API key, so this never affects another client.
+			reqCC := strings.ToLower(strings.Join(r.Header.Values("Cache-Control"), ","))
+			noStore := strings.Contains(reqCC, "no-store")
+			outcome := "BYPASS"
+			if !noStore && !strings.Contains(reqCC, "no-cache") {
+				if resp, ok := c.Get(k); ok {
+					h := w.Header()
+					for name, vals := range resp.Header {
+						h[name] = slices.Clone(vals)
+					}
+					h.Set("Age", strconv.Itoa(int(c.now().Sub(resp.StoredAt)/time.Second)))
+					h.Set("X-Cache", "HIT")
+					w.WriteHeader(resp.Status)
+					_, _ = w.Write(resp.Body)
+					return
 				}
-				h.Set("Age", strconv.Itoa(int(c.now().Sub(resp.StoredAt)/time.Second)))
-				h.Set("X-Cache", "HIT")
-				w.WriteHeader(resp.Status)
-				_, _ = w.Write(resp.Body)
-				return
+				outcome = "MISS"
 			}
+			w.Header().Set("X-Cache", outcome)
 
-			w.Header().Set("X-Cache", "MISS")
 			// Headers already set belong to this request (request ID, rate-limit
 			// counts, X-Cache), not to the upstream response: never store them.
 			perRequest := make(map[string]bool, len(w.Header()))
@@ -53,7 +63,7 @@ func Middleware(c *Cache, ttlFor func(path string) time.Duration) func(http.Hand
 			}
 			rec := &recorder{ResponseWriter: w, perRequest: perRequest}
 			next.ServeHTTP(rec, r)
-			if resp, ok := rec.cacheable(); ok {
+			if resp, ok := rec.cacheable(); ok && !noStore {
 				resp.StoredAt = c.now()
 				c.Put(k, resp, ttl)
 			}

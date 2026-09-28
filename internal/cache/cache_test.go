@@ -66,8 +66,8 @@ func TestExpiration(t *testing.T) {
 	if _, ok := c.Get(key("/a", 1)); ok {
 		t.Fatal("entry served at its expiry instant")
 	}
-	if s := c.Stats(); s.Entries != 0 || s.Bytes != 0 {
-		t.Errorf("expired entry not removed on read: %+v", s)
+	if s := c.Stats(); s.Entries != 0 || s.Bytes != 0 || s.Expired != 1 {
+		t.Errorf("expired entry not removed and counted on read: %+v", s)
 	}
 }
 
@@ -122,6 +122,9 @@ func TestByteLimit(t *testing.T) {
 	c.Sweep()
 	if !c.Put(key("/b", 1), resp(strings.Repeat("y", 60)), time.Second) {
 		t.Fatal("space not reclaimed after sweep")
+	}
+	if s := c.Stats(); s.Rejected != 1 || s.Expired != 1 {
+		t.Errorf("rejected = %d, expired = %d; want 1 and 1", s.Rejected, s.Expired)
 	}
 }
 
@@ -189,7 +192,7 @@ func TestMetricsHandler(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	c.MetricsHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	for _, want := range []string{"cache_hits 2\n", "cache_misses 1\n", "cache_entries 1\n", "# TYPE cache_hits counter"} {
+	for _, want := range []string{"cache_hits 2\n", "cache_misses 1\n", "cache_entries 1\n", "cache_expired 0\n", "cache_rejected 0\n", "# TYPE cache_hits counter"} {
 		if !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("metrics missing %q:\n%s", want, rec.Body)
 		}

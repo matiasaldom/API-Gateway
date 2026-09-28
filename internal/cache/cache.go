@@ -55,6 +55,8 @@ type entry struct {
 // Stats is a point-in-time view of cache activity.
 type Stats struct {
 	Hits, Misses uint64
+	Expired      uint64 // entries removed because their TTL passed
+	Rejected     uint64 // responses not stored because the cache was full
 	Entries      int
 	Bytes        int
 }
@@ -70,7 +72,7 @@ type Cache struct {
 	entries map[Key]entry
 	bytes   int
 
-	hits, misses atomic.Uint64
+	hits, misses, expired, rejected atomic.Uint64
 }
 
 // New returns a cache holding at most maxBytes of responses, using now as its clock.
@@ -93,6 +95,7 @@ func (c *Cache) Get(k Key) (Response, bool) {
 		c.mu.Lock()
 		if cur, still := c.entries[k]; still && !now.Before(cur.expires) {
 			c.remove(k, cur)
+			c.expired.Add(1)
 		}
 		c.mu.Unlock()
 	}
@@ -109,6 +112,7 @@ func (c *Cache) Put(k Key, resp Response, ttl time.Duration) bool {
 
 	old, replacing := c.entries[k]
 	if c.bytes-old.size+size > c.maxBytes {
+		c.rejected.Add(1)
 		return false
 	}
 	if replacing {
@@ -131,6 +135,7 @@ func (c *Cache) Sweep() int {
 			n++
 		}
 	}
+	c.expired.Add(uint64(n))
 	return n
 }
 
@@ -151,7 +156,10 @@ func (c *Cache) RunJanitor(ctx context.Context, interval time.Duration) {
 func (c *Cache) Stats() Stats {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return Stats{Hits: c.hits.Load(), Misses: c.misses.Load(), Entries: len(c.entries), Bytes: c.bytes}
+	return Stats{
+		Hits: c.hits.Load(), Misses: c.misses.Load(), Expired: c.expired.Load(), Rejected: c.rejected.Load(),
+		Entries: len(c.entries), Bytes: c.bytes,
+	}
 }
 
 // MetricsHandler serves cache statistics in the Prometheus text format.
@@ -161,6 +169,8 @@ func (c *Cache) MetricsHandler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		fmt.Fprintf(w, "# HELP cache_hits Responses served from the cache.\n# TYPE cache_hits counter\ncache_hits %d\n", s.Hits)
 		fmt.Fprintf(w, "# HELP cache_misses Cacheable requests not found in the cache.\n# TYPE cache_misses counter\ncache_misses %d\n", s.Misses)
+		fmt.Fprintf(w, "# HELP cache_expired Entries removed because their TTL passed.\n# TYPE cache_expired counter\ncache_expired %d\n", s.Expired)
+		fmt.Fprintf(w, "# HELP cache_rejected Responses not stored because the cache was full.\n# TYPE cache_rejected counter\ncache_rejected %d\n", s.Rejected)
 		fmt.Fprintf(w, "# HELP cache_entries Responses currently cached.\n# TYPE cache_entries gauge\ncache_entries %d\n", s.Entries)
 		fmt.Fprintf(w, "# HELP cache_bytes Approximate bytes held by cached responses.\n# TYPE cache_bytes gauge\ncache_bytes %d\n", s.Bytes)
 	})

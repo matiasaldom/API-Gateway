@@ -20,6 +20,7 @@ func TestLoad(t *testing.T) {
 	cfg, err := Load(writeConfig(t, `
 listen_addr: ":9090"
 upstream_timeout: 5s
+rate_limit_algorithm: token_bucket
 routes:
   - prefix: /users
     upstream: http://localhost:8081
@@ -29,7 +30,7 @@ routes:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ListenAddr != ":9090" || cfg.UpstreamTimeout != 5*time.Second || len(cfg.Routes) != 2 {
+	if cfg.ListenAddr != ":9090" || cfg.UpstreamTimeout != 5*time.Second || cfg.RateLimitAlgorithm != TokenBucket || len(cfg.Routes) != 2 {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
 	if cfg.Routes[1] != (Route{Prefix: "/albums", Upstream: "http://localhost:8082"}) {
@@ -42,7 +43,7 @@ func TestLoadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ListenAddr != DefaultListenAddr || cfg.UpstreamTimeout != DefaultUpstreamTimeout {
+	if cfg.ListenAddr != DefaultListenAddr || cfg.UpstreamTimeout != DefaultUpstreamTimeout || cfg.RateLimitAlgorithm != FixedWindow {
 		t.Fatalf("defaults not applied: %+v", cfg)
 	}
 }
@@ -52,6 +53,7 @@ func TestLoadErrors(t *testing.T) {
 		"unknown field":    "listen_adr: \":8080\"\n",
 		"bad duration":     "upstream_timeout: soon\n",
 		"negative timeout": "upstream_timeout: -1s\n",
+		"unknown limiter":  "rate_limit_algorithm: leaky_bucket\n",
 		"malformed yaml":   "routes: [\n",
 	}
 	for name, body := range tests {

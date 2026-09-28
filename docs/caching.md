@@ -59,10 +59,25 @@ The cache adds these headers when it is consulted:
 
 | Header | Value |
 |---|---|
-| `X-Cache` | `MISS` when the backend was called, `HIT` when served from memory. Absent when caching didn't apply (non-GET request, or a route without `cache_ttl`). |
+| `X-Cache` | `MISS` when the backend was called, `HIT` when served from memory, `BYPASS` when the client asked to skip the cache (see below). Absent when caching didn't apply (non-GET request, or a route without `cache_ttl`). |
 | `Age` | On hits: seconds since the response was stored |
 
 A hit replays the stored status, body and backend headers, such as `Content-Type` and `ETag`. Some headers are always generated fresh for each request and never taken from the cache: `X-Request-ID`, `X-RateLimit-*` and `Date`.
+
+### Skipping the cache
+
+A client can skip its cached copy for testing or to get fresh data, with the standard request header:
+
+| Request header | Effect |
+|---|---|
+| `Cache-Control: no-cache` | The backend is called, and its response replaces the cached entry |
+| `Cache-Control: no-store` | The backend is called, and nothing is stored |
+
+Both return `X-Cache: BYPASS` and count as neither a hit nor a miss. Any authenticated client may do this: entries belong to one API key, so a bypass only affects that key's own copy. Bypassed requests still count against the rate limit.
+
+```sh
+curl -i http://localhost:8080/albums/1 -H "Authorization: Bearer $KEY" -H "Cache-Control: no-cache"
+```
 
 ## Expiry and memory
 
@@ -78,6 +93,8 @@ A hit replays the stored status, body and backend headers, such as `Content-Type
 ```
 cache_hits 2
 cache_misses 1
+cache_expired 0
+cache_rejected 0
 cache_entries 1
 cache_bytes 171
 ```
@@ -86,8 +103,12 @@ cache_bytes 171
 |---|---|---|
 | `cache_hits` | counter | Responses served from the cache |
 | `cache_misses` | counter | Cacheable requests that had to go to the backend |
+| `cache_expired` | counter | Entries removed because their TTL passed |
+| `cache_rejected` | counter | Responses not stored because the cache was full. If this grows, raise the memory cap or lower TTLs. |
 | `cache_entries` | gauge | Responses currently stored |
 | `cache_bytes` | gauge | Approximate memory used by stored responses |
+
+The same endpoint also reports the analytics collector's `analytics_events_written`, `analytics_events_failed` and `analytics_events_dropped` counters (see [analytics.md](analytics.md)).
 
 Hit ratio = `cache_hits / (cache_hits + cache_misses)`. The endpoint only exposes these counts, never response data. If you don't want it public, block `/metrics` at your load balancer.
 
@@ -96,7 +117,7 @@ Hit ratio = `cache_hits / (cache_hits + cache_misses)`. The endpoint only expose
 | What | Where |
 |---|---|
 | Storing and reading entries, expiry at the exact instant, sweeping, the memory cap, key generation, concurrent access, metrics output | `internal/cache/cache_test.go` |
-| Hits skip the backend, fresh per-request headers, requests that bypass the cache, responses that are never stored, `Vary: Accept-Encoding` | `internal/cache/middleware_test.go` |
+| Hits skip the backend, fresh per-request headers, requests that bypass the cache, client `no-cache`/`no-store` bypass, responses that are never stored, `Vary: Accept-Encoding` | `internal/cache/middleware_test.go` |
 | Repeated GET skips the backend, TTL expiry calls the backend again, API keys don't share entries, POST is never cached, a route without a TTL is never cached | `tests/cache_test.go` |
 
 All of these run clean under `go test -race ./...` (see [rate-limiting.md](rate-limiting.md#tests) for running `-race` on Windows).

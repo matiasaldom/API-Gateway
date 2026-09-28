@@ -4,6 +4,7 @@ package routing
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strings"
@@ -113,7 +114,21 @@ func parseUpstream(raw string) (*url.URL, error) {
 	if u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("upstream %q must not contain a query or fragment", raw)
 	}
+	if ip, err := netip.ParseAddr(u.Hostname()); err == nil && !SafeUpstreamIP(ip) {
+		return nil, fmt.Errorf("upstream %q points at a link-local or unspecified address", raw)
+	}
 	return u, nil
+}
+
+// SafeUpstreamIP reports whether the gateway may connect to ip. Link-local
+// addresses (169.254.0.0/16, fe80::/10) are refused because cloud metadata
+// services live there; a route pointed at one would hand out instance
+// credentials. Private and loopback addresses stay allowed: upstreams are
+// usually internal services. The proxy's dialer checks this again after DNS
+// resolution, so a hostname can't be used to get around it.
+func SafeUpstreamIP(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	return !ip.IsLinkLocalUnicast() && !ip.IsLinkLocalMulticast() && !ip.IsUnspecified()
 }
 
 // ValidateUpstream reports whether raw is a usable upstream base URL.

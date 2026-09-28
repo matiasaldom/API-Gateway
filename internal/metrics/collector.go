@@ -7,6 +7,7 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -125,6 +126,14 @@ func (c *Collector) Close(ctx context.Context) error {
 
 func (c *Collector) Stats() CollectorStats {
 	return CollectorStats{Written: c.written.Load(), Failed: c.failed.Load(), Dropped: c.dropped.Load()}
+}
+
+// WriteMetrics writes the collector's counters in the Prometheus text format.
+func (c *Collector) WriteMetrics(w io.Writer) {
+	s := c.Stats()
+	fmt.Fprintf(w, "# HELP analytics_events_written Analytics events stored in PostgreSQL.\n# TYPE analytics_events_written counter\nanalytics_events_written %d\n", s.Written)
+	fmt.Fprintf(w, "# HELP analytics_events_failed Analytics events lost to a write error.\n# TYPE analytics_events_failed counter\nanalytics_events_failed %d\n", s.Failed)
+	fmt.Fprintf(w, "# HELP analytics_events_dropped Analytics events dropped because the buffer was full.\n# TYPE analytics_events_dropped counter\nanalytics_events_dropped %d\n", s.Dropped)
 }
 
 func (c *Collector) run() {

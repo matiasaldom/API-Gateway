@@ -1,0 +1,11 @@
+# Gateway configuration for docker compose: routes point at the demo echo services.
+listen_addr: ":8080"
+upstream_timeout: 10s
+rate_limit_algorithm: fixed_window # or token_bucket
+
+routes:
+  - prefix: /users
+    upstream: http://users:8081
+  - prefix: /albums
+    upstream: http://albums:8082
+    cache_ttl: 30s

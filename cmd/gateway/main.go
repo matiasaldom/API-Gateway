@@ -17,6 +17,7 @@ import (
 	"api-gateway/internal/auth"
 	"api-gateway/internal/cache"
 	"api-gateway/internal/config"
+	"api-gateway/internal/httpx"
 	"api-gateway/internal/limiter"
 	"api-gateway/internal/metrics"
 	"api-gateway/internal/proxy"
@@ -28,6 +29,10 @@ import (
 // ponytail: fixed response-cache budget; when full, new responses go uncached until
 // the janitor frees expired ones. Make it a config field if deployments need to tune it.
 const cacheMaxBytes = 256 << 20
+
+// ponytail: fixed request body cap for proxied traffic (larger bodies get 413).
+// Make it a config field, or per route, if an upstream accepts large uploads.
+const maxRequestBody = 10 << 20
 
 func main() {
 	configPath := flag.String("config", "gateway.yaml", "path to YAML config file")
@@ -93,19 +98,37 @@ func run(configPath string, logger *slog.Logger) error {
 		logger.Info("analytics collector stopped", "written", s.Written, "failed", s.Failed, "dropped", s.Dropped)
 	}()
 
+	var rateLimiter limiter.Allower = limiter.New(time.Now)
+	if cfg.RateLimitAlgorithm == config.TokenBucket {
+		rateLimiter = limiter.NewTokenBucket(time.Now)
+	}
+
 	handler, err := proxy.NewHandler(routes, cfg.UpstreamTimeout, logger,
 		metrics.Middleware(collector, routes.RoutePrefix), // first: times and counts everything, including auth failures
+		proxy.LimitBody(maxRequestBody),                   // before auth: oversized bodies never cost a key lookup
 		auth.Middleware(db, logger),
 		metrics.Identify, // records the authenticated key on the analytics event
-		limiter.Middleware(limiter.New(time.Now), logger),
+		limiter.Middleware(rateLimiter, logger),
 		cache.Middleware(responseCache, routes.CacheTTL),
 	)
 	if err != nil {
 		return err
 	}
 
-	// /metrics, /admin, and /analytics sit outside the API-key pipeline, like /health.
+	// /metrics, /ready, /admin, and /analytics sit outside the API-key pipeline, like /health.
+	// /health says the process is up; /ready also checks PostgreSQL, which every
+	// authenticated request needs, so load balancers stop sending traffic without it.
 	cacheMetrics := responseCache.MetricsHandler()
+	ready := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := db.Ping(ctx); err != nil {
+			logger.WarnContext(r.Context(), "readiness check failed", "error", err.Error())
+			httpx.JSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable", "database": "unreachable"})
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	})
 	var adminAPI http.Handler
 	if cfg.AdminToken != "" {
 		h, err := admin.New(db, routes, metrics.NewAnalytics(db, collector, logger), cfg.AdminToken, logger)
@@ -120,6 +143,9 @@ func run(configPath string, logger *slog.Logger) error {
 		switch {
 		case r.URL.Path == "/metrics" && r.Method == http.MethodGet:
 			cacheMetrics.ServeHTTP(w, r)
+			collector.WriteMetrics(w)
+		case r.URL.Path == "/ready" && r.Method == http.MethodGet:
+			ready.ServeHTTP(w, r)
 		case adminAPI != nil && (strings.HasPrefix(r.URL.Path, "/admin/") || strings.HasPrefix(r.URL.Path, "/analytics/")):
 			adminAPI.ServeHTTP(w, r)
 		default:
@@ -141,7 +167,7 @@ func run(configPath string, logger *slog.Logger) error {
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()
-	logger.Info("gateway listening", "addr", cfg.ListenAddr, "routes", len(cfg.Routes), "upstream_timeout", cfg.UpstreamTimeout.String())
+	logger.Info("gateway listening", "addr", cfg.ListenAddr, "routes", len(cfg.Routes), "upstream_timeout", cfg.UpstreamTimeout.String(), "rate_limit_algorithm", cfg.RateLimitAlgorithm)
 
 	select {
 	case err := <-errCh:

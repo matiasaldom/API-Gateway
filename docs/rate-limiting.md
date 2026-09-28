@@ -58,6 +58,26 @@ The body has the same shape as every other gateway error (see [authentication.md
 
 See ADR-002 in [decisions.md](decisions.md) for why this design was chosen.
 
+## Token bucket (optional)
+
+Fixed windows are the default. Set this in `gateway.yaml` to use token buckets instead:
+
+```yaml
+rate_limit_algorithm: token_bucket   # default: fixed_window
+```
+
+Each key gets a bucket holding up to its plan limit in tokens, refilled continuously at `limit / 60` tokens per second. Every request takes one token, and an empty bucket means `429`.
+
+| | Fixed window | Token bucket |
+|---|---|---|
+| Burst from idle | Full limit | Full limit |
+| Most requests in any 2 seconds (limit 60/min) | 120, across a window boundary | 62: the full bucket plus 2 seconds of refill |
+| `X-RateLimit-Remaining` | Requests left in this minute | Whole tokens left in the bucket |
+| `Retry-After` on 429 | Seconds until the next minute | Seconds until one token refills (rounded up) |
+| Memory | One counter per key active this minute | One bucket per key active in the last minute |
+
+`TestTokenBucketHasNoWindowBoundaryBurst` checks the 120-versus-62 row against both algorithms. Buckets idle for a full minute are dropped, since a full bucket and a missing one behave the same. Everything else stays the same: limits come from the plan and apply on the next request, state is per instance, and one rejection per key per minute is logged. See ADR-007.
+
 ## Logging
 
 The first rejection for a key in each window is logged once at `WARN`:
@@ -80,7 +100,9 @@ Measured on an i7-11700B:
 | `Allow`, 8 goroutines with different keys | ~80 ns |
 | Middleware added to a request (headers included) | ~275 ns |
 
-For scale, a proxied request takes on the order of 100 µs. To reproduce:
+The token bucket's `Allow` measures ~57 ns against ~55 ns for the fixed window, both with 0 allocations, when both run in the `golang:1.25` Linux container on the same machine. Container numbers run higher than the native Windows figures above.
+
+For scale, a proxied request costs about 0.5 ms end to end through the gateway (see [benchmarks.md](benchmarks.md)), so the limiter is well under 0.1% of it. To reproduce:
 
 ```sh
 go test -run '^$' -bench . -benchmem ./internal/limiter/
@@ -93,6 +115,7 @@ If contention on the mutex ever shows up under real load, the next step is to sp
 | What | Where |
 |---|---|
 | Counter increments, window reset, exact boundary, limit exceeded | `internal/limiter/limiter_test.go` |
+| Token bucket: burst then refill, no boundary burst, lowered limit, idle-bucket sweep, concurrency, middleware headers | `internal/limiter/tokenbucket_test.go` |
 | Many concurrent callers never exceed the limit, including across a window change | `internal/limiter/limiter_test.go` |
 | Free plan: 101st request → 429; Pro plan: 1001st → 429, with headers | `tests/ratelimit_test.go` |
 | Limits are per key; 250 concurrent requests → exactly 100 allowed | `tests/ratelimit_test.go` |

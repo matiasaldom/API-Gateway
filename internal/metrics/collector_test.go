@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -108,6 +109,13 @@ func TestBatching(t *testing.T) {
 	}
 	if s := c.Stats(); s.Written != 25 || s.Failed != 0 || s.Dropped != 0 {
 		t.Errorf("stats = %+v", s)
+	}
+	var m strings.Builder
+	c.WriteMetrics(&m)
+	for _, want := range []string{"analytics_events_written 25\n", "analytics_events_dropped 0\n", "# TYPE analytics_events_failed counter"} {
+		if !strings.Contains(m.String(), want) {
+			t.Errorf("metrics missing %q:\n%s", want, m.String())
+		}
 	}
 }
 

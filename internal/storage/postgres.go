@@ -47,6 +47,9 @@ func Open(ctx context.Context, databaseURL string) (*DB, error) {
 
 func (db *DB) Close() { db.pool.Close() }
 
+// Ping reports whether the database is reachable (used by the /ready endpoint).
+func (db *DB) Ping(ctx context.Context) error { return db.pool.Ping(ctx) }
+
 // LookupAPIKey implements auth.KeyStore.
 func (db *DB) LookupAPIKey(ctx context.Context, hash []byte) (auth.APIKey, error) {
 	var k auth.APIKey

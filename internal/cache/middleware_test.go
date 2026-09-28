@@ -109,6 +109,44 @@ func TestMiddlewareBypass(t *testing.T) {
 	}
 }
 
+func TestMiddlewareClientBypass(t *testing.T) {
+	c, _ := newTestCache(1 << 20)
+	up := &upstream{}
+	h := Middleware(c, constTTL(ttl))(up)
+	get := func(cacheControl string) string {
+		req := httptest.NewRequest(http.MethodGet, "/albums", nil)
+		req = req.WithContext(auth.NewContext(req.Context(), auth.APIKey{ID: 1}))
+		if cacheControl != "" {
+			req.Header.Set("Cache-Control", cacheControl)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Header().Get("X-Cache")
+	}
+
+	if got := get("no-store"); got != "BYPASS" {
+		t.Fatalf("no-store: X-Cache = %q, want BYPASS", got)
+	}
+	if c.Stats().Entries != 0 {
+		t.Fatal("no-store request stored its response")
+	}
+	if got := get(""); got != "MISS" {
+		t.Fatalf("first plain GET: X-Cache = %q, want MISS", got)
+	}
+	if got := get("No-Cache"); got != "BYPASS" {
+		t.Fatalf("no-cache: X-Cache = %q, want BYPASS", got)
+	}
+	if got := get(""); got != "HIT" {
+		t.Fatalf("plain GET after no-cache refresh: X-Cache = %q, want HIT", got)
+	}
+	if n := up.calls.Load(); n != 3 {
+		t.Errorf("upstream calls = %d, want 3 (no-store, miss, no-cache)", n)
+	}
+	if s := c.Stats(); s.Hits != 1 || s.Misses != 1 {
+		t.Errorf("bypassed requests must not count as hits or misses: %+v", s)
+	}
+}
+
 func TestMiddlewareScopesEntriesToAPIKey(t *testing.T) {
 	c, _ := newTestCache(1 << 20)
 	up := &upstream{}

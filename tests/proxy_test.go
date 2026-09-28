@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -284,6 +287,78 @@ func TestHealthAndUnknownRoute(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown route: status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// Under concurrency the gateway must reuse upstream connections instead of
+// opening one per request (Go's default pool keeps only 2 idle per host).
+func TestUpstreamConnectionsAreReused(t *testing.T) {
+	var opened atomic.Int64
+	upstream := httptest.NewUnstartedServer(echoHandler("users"))
+	upstream.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			opened.Add(1)
+		}
+	}
+	upstream.Start()
+	t.Cleanup(upstream.Close)
+	gw := httptest.NewServer(newGateway(t, 5*time.Second, nil, config.Route{Prefix: "/users", Upstream: upstream.URL}))
+	t.Cleanup(gw.Close)
+
+	const concurrency, rounds = 50, 20
+	for range rounds {
+		var wg sync.WaitGroup
+		for range concurrency {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				resp, err := http.Get(gw.URL + "/users/1")
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				_, _ = io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}()
+		}
+		wg.Wait()
+	}
+	if n := opened.Load(); n > 2*concurrency {
+		t.Errorf("gateway opened %d upstream connections for %d requests; want at most %d (reuse)", n, concurrency*rounds, 2*concurrency)
+	}
+}
+
+func TestRequestBodyLimit(t *testing.T) {
+	users := newEchoUpstream(t, "users")
+	router, err := routing.New([]config.Route{{Prefix: "/users", Upstream: users.URL}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := proxy.NewHandler(routing.NewTable(router), 5*time.Second, slog.New(slog.DiscardHandler), proxy.LimitBody(16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := httptest.NewServer(h)
+	t.Cleanup(gw.Close)
+
+	post := func(body io.Reader, contentLength int64) int {
+		req, _ := http.NewRequest(http.MethodPost, gw.URL+"/users", body)
+		req.ContentLength = contentLength // -1 sends the body chunked, with no declared size
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := post(strings.NewReader("small"), 5); got != http.StatusCreated {
+		t.Errorf("body under the limit: status = %d, want 201", got)
+	}
+	if got := post(strings.NewReader(strings.Repeat("x", 17)), 17); got != http.StatusRequestEntityTooLarge {
+		t.Errorf("declared oversized body: status = %d, want 413", got)
+	}
+	if got := post(io.MultiReader(strings.NewReader(strings.Repeat("x", 17))), -1); got != http.StatusRequestEntityTooLarge {
+		t.Errorf("chunked oversized body: status = %d, want 413", got)
 	}
 }
 

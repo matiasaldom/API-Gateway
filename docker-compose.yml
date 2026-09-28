@@ -1,0 +1,77 @@
+# Local demo stack: PostgreSQL (migrated and seeded), two demo upstreams, the
+# gateway, and the dashboard.
+#
+#   docker compose up --build        gateway on :8080, dashboard on :3000
+#   docker compose down -v           stop and delete the database volume
+#
+# The seeded API keys and the default ADMIN_TOKEN are public. Local use only.
+name: api-gateway
+
+x-app: &app
+  build: .
+  image: api-gateway:local
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: apigateway
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/migrations:ro
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "apigateway"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  users:
+    <<: *app
+    command: ["echo", "-addr", ":8081", "-service", "users"]
+
+  albums:
+    <<: *app
+    command: ["echo", "-addr", ":8082", "-service", "albums"]
+
+  gateway:
+    <<: *app
+    command: ["gateway", "-config", "/etc/gateway/gateway.yaml"]
+    volumes:
+      - ./docker/gateway.yaml:/etc/gateway/gateway.yaml:ro
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/apigateway?sslmode=disable
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-local-demo-admin-token-do-not-use-in-production}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      users:
+        condition: service_started
+      albums:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "3000:80"
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  # Load generator for scripts/bench.sh; not started by `docker compose up`.
+  bench:
+    build: ./docker/bench
+    profiles: ["bench"]
+
+volumes:
+  pgdata:

@@ -13,12 +13,17 @@ import (
 const (
 	DefaultListenAddr      = ":8080"
 	DefaultUpstreamTimeout = 30 * time.Second
+
+	FixedWindow = "fixed_window"
+	TokenBucket = "token_bucket"
 )
 
 type Config struct {
 	ListenAddr      string        `yaml:"listen_addr"`
 	UpstreamTimeout time.Duration `yaml:"upstream_timeout"`
-	Routes          []Route       `yaml:"routes"`
+	// RateLimitAlgorithm is FixedWindow (the default) or TokenBucket.
+	RateLimitAlgorithm string  `yaml:"rate_limit_algorithm"`
+	Routes             []Route `yaml:"routes"`
 
 	// DatabaseURL comes from the DATABASE_URL environment variable so credentials stay out of the config file.
 	DatabaseURL string `yaml:"-"`
@@ -58,6 +63,13 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("upstream_timeout must be positive, got %s", cfg.UpstreamTimeout)
 	case cfg.UpstreamTimeout == 0:
 		cfg.UpstreamTimeout = DefaultUpstreamTimeout
+	}
+	switch cfg.RateLimitAlgorithm {
+	case "":
+		cfg.RateLimitAlgorithm = FixedWindow
+	case FixedWindow, TokenBucket:
+	default:
+		return nil, fmt.Errorf("rate_limit_algorithm must be %q or %q, got %q", FixedWindow, TokenBucket, cfg.RateLimitAlgorithm)
 	}
 	cfg.DatabaseURL = os.Getenv("DATABASE_URL")
 	cfg.AdminToken = os.Getenv("ADMIN_TOKEN")

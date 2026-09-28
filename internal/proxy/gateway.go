@@ -4,11 +4,15 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"sync"
+	"syscall"
 	"time"
 
 	"api-gateway/internal/httpx"
@@ -67,8 +71,59 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.proxyFor(route.Target).ServeHTTP(w, r.WithContext(ctx))
 }
 
+// transport is http.DefaultTransport with two changes:
+//
+//   - A pool sized for a proxy. The default keeps only 2 idle connections per
+//     host, so under concurrency almost every request opened a new TCP
+//     connection and closed it afterwards. Benchmarks showed throughput
+//     collapsing and 502s from ephemeral-port exhaustion (ADR-009).
+//   - A dialer that refuses unsafe upstream addresses after DNS resolution
+//     (see routing.SafeUpstreamIP).
+var transport = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: refuseUnsafeDial}
+	t.DialContext = d.DialContext
+	// ponytail: fixed pool size; idle connections beyond it are closed and
+	// reopened. Make it configurable if one upstream sees more concurrency.
+	t.MaxIdleConns = 4096
+	t.MaxIdleConnsPerHost = 512
+	return t
+}()
+
+// refuseUnsafeDial runs just before each upstream connection, with the resolved IP.
+func refuseUnsafeDial(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return err
+	}
+	if !routing.SafeUpstreamIP(ip) {
+		return fmt.Errorf("refusing to connect to %s: link-local or unspecified address", ip)
+	}
+	return nil
+}
+
+// LimitBody rejects request bodies larger than maxBytes with 413. A declared
+// Content-Length is checked up front; chunked bodies are cut off by
+// http.MaxBytesReader, and the proxy's error handler turns that into 413 too.
+func LimitBody(maxBytes int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.ContentLength > maxBytes {
+				httpx.Error(w, r, http.StatusRequestEntityTooLarge, "request body too large")
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // proxyFor returns the reverse proxy for target, creating it on first use.
-// Proxies share http.DefaultTransport, so connection pooling is per upstream host.
+// Proxies share one transport, so connection pooling is per upstream host.
 func (g *gateway) proxyFor(target *url.URL) *httputil.ReverseProxy {
 	key := target.String()
 	if p, ok := g.proxies.Load(key); ok {
@@ -80,6 +135,7 @@ func (g *gateway) proxyFor(target *url.URL) *httputil.ReverseProxy {
 
 func (g *gateway) newReverseProxy(target *url.URL) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
+		Transport: transport,
 		// SetURL keeps the incoming path and query, appending them to the target.
 		// Headers (including X-Request-ID) and body are forwarded as-is; hop-by-hop
 		// headers are stripped by ReverseProxy.
@@ -89,7 +145,11 @@ func (g *gateway) newReverseProxy(target *url.URL) *httputil.ReverseProxy {
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			status := http.StatusBadGateway
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+			var tooLarge *http.MaxBytesError
+			switch {
+			case errors.As(err, &tooLarge):
+				status = http.StatusRequestEntityTooLarge
+			case errors.Is(err, context.DeadlineExceeded) || errors.Is(r.Context().Err(), context.DeadlineExceeded):
 				status = http.StatusGatewayTimeout
 			}
 			g.logger.ErrorContext(r.Context(), "upstream request failed",

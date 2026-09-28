@@ -91,6 +91,10 @@ func TestNewRejectsInvalidRoutes(t *testing.T) {
 		"negative cache ttl":      {{Prefix: "/users", Upstream: "http://a", CacheTTL: -time.Second}},
 		"credentials in upstream": {{Prefix: "/users", Upstream: "http://user:pw@a"}},
 		"unparseable address":     {{Prefix: "/users", Upstream: "http://a b"}},
+		"cloud metadata address":  {{Prefix: "/users", Upstream: "http://169.254.169.254"}},
+		"ipv6 link-local":         {{Prefix: "/users", Upstream: "http://[fe80::1]:8080"}},
+		"ipv4-mapped link-local":  {{Prefix: "/users", Upstream: "http://[::ffff:169.254.169.254]"}},
+		"unspecified address":     {{Prefix: "/users", Upstream: "http://0.0.0.0:8081"}},
 	}
 	for name, routes := range tests {
 		if _, err := New(routes); err == nil {

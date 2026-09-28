@@ -171,7 +171,7 @@ func TestConcurrentRequestsAcrossWindowRollover(t *testing.T) {
 
 // --- middleware ---
 
-func serve(t *testing.T, l *Limiter, key *auth.APIKey, logs *bytes.Buffer) *httptest.ResponseRecorder {
+func serve(t *testing.T, l Allower, key *auth.APIKey, logs *bytes.Buffer) *httptest.ResponseRecorder {
 	t.Helper()
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	h := Middleware(l, slog.New(slog.NewJSONHandler(logs, nil)))(next)

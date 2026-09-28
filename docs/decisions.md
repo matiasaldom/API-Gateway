@@ -155,3 +155,120 @@ Cons:
 Future Consideration:
 - /admin/analytics/timeseries (per-minute buckets) for history charts
 - Serve dist/ from the gateway itself behind the admin token
+
+ADR-007
+
+Token bucket is available as a second rate-limiting algorithm,
+chosen for the whole gateway with rate_limit_algorithm in
+gateway.yaml. Fixed window stays the default. Both implement
+one small interface (Allow(key, limit) → Decision), so the
+middleware, headers, logging, and plan limits are shared.
+
+Pros:
+- Removes the 2x burst at window boundaries (ADR-002): a key
+  never gets more than limit + rate*t requests in any span t
+- Clients still get their full limit as an initial burst, so
+  well-behaved clients see no difference
+- Retry-After is exact: time until one token refills
+- Same memory bound as fixed windows: buckets idle for a minute
+  are dropped, because a full bucket and no bucket are the same
+
+Cons:
+- Float arithmetic per request, though measured cost is the same
+  as the fixed-window counter (~57 ns vs ~55 ns, no allocations)
+- Remaining is "tokens now", which clients find less intuitive
+  than "requests left this minute"
+- The idle-bucket sweep runs inline once a minute under the lock,
+  scanning every bucket
+- One algorithm for all plans; not selectable per plan
+
+Future Consideration:
+- Per-plan algorithm (a plans column) if tiers need different burst rules
+- Move the sweep to a background goroutine at very high key counts
+- Shared buckets in Redis for multiple instances (same limit as ADR-002)
+
+ADR-008
+
+The gateway refuses requests and upstreams that could hurt it
+or the network it runs in:
+- Request bodies over 10 MiB get 413 (checked against
+  Content-Length first, and enforced while streaming for
+  chunked bodies)
+- Upstreams may not be link-local (169.254.0.0/16, fe80::/10)
+  or unspecified addresses. Checked when a route is loaded or
+  edited, and again by the proxy's dialer after DNS resolution
+- /ready checks PostgreSQL; /health only checks the process
+
+Pros:
+- A stolen admin token can't point a route at the cloud
+  metadata service (169.254.169.254) to read instance
+  credentials, even through a hostname that resolves there
+- One oversized upload can't tie up an upstream or gateway memory
+- Load balancers can tell "process up" from "able to serve"
+
+Cons:
+- Private (10/8, 192.168/16) and loopback upstreams stay
+  allowed, because internal services are the normal case; the
+  gateway does not stop routes to other internal services
+- AWS's IPv6 metadata address (fd00:ec2::254) is a unique-local
+  address, not link-local, and is not blocked
+- One body limit for all routes
+
+Future Consideration:
+- Per-route body limits and an upstream allowlist (hosts or CIDRs)
+  in gateway.yaml
+
+ADR-009
+
+The proxy's upstream connection pool keeps up to 512 idle
+connections per upstream host (4096 in total), instead of Go's
+default of 2 per host.
+
+Found by the first benchmark run (docs/benchmarks.md): with the
+default, a gateway serving 50 concurrent clients kept 2
+connections and closed the other 48 after every request. Each
+closed connection sits in TIME_WAIT, so the container ran out of
+ephemeral ports: 10,324 requests failed with "connect: cannot
+assign requested address" (502), throughput without the cache fell
+to ~1,000 req/s, and the gateway spent most of its CPU opening
+TCP connections.
+
+Pros:
+- Connections are reused under concurrency; the fix removed every
+  upstream error in the benchmark suite
+- TestUpstreamConnectionsAreReused fails if the pool regresses
+  (it counts new connections at the upstream)
+
+Cons:
+- Up to 512 idle connections per upstream held open for 90s after
+  a burst (IdleConnTimeout), on both sides
+- One fixed size for all upstreams
+
+Future Consideration:
+- Pool size per route in gateway.yaml if upstreams differ a lot
+- MaxConnsPerHost to cap connections to a fragile upstream
+
+ADR-010
+
+docker compose runs a complete demo: PostgreSQL migrated and
+seeded on first start, two echo backends (cmd/echo), the
+gateway, and the dashboard behind nginx. The seed creates
+demo API keys with fixed, published values, and compose has
+a default ADMIN_TOKEN.
+
+Pros:
+- One command from clone to working demo; the demo script,
+  the benchmarks, and the CI end-to-end job all use the same keys
+- nginx serves the dashboard and proxies /admin, which is the
+  same-origin setup ADR-006 needs outside Vite
+
+Cons:
+- Anyone who reads the repository knows the demo credentials.
+  The compose file binds PostgreSQL to 127.0.0.1, but the
+  gateway (8080) and dashboard (3000) listen on all interfaces
+- Migrations run only when the database volume is created;
+  new migrations need `docker compose down -v` or a manual apply
+
+Future Consideration:
+- A migration tool with version tracking (golang-migrate) if the
+  schema changes often

@@ -1,4 +1,5 @@
-// Package limiter enforces per-API-key request limits with fixed one-minute windows.
+// Package limiter enforces per-API-key request limits, with fixed one-minute
+// windows (Limiter, the default) or token buckets (TokenBucket).
 package limiter
 
 import (
@@ -80,10 +81,15 @@ func (l *Limiter) Allow(key int64, limit int) Decision {
 	}
 }
 
+// Allower is a rate-limiting algorithm: Limiter (fixed window) or TokenBucket.
+type Allower interface {
+	Allow(key int64, limit int) Decision
+}
+
 // Middleware limits each request by its authenticated API key's plan limit.
 // It must run after auth.Middleware. Every limited response carries
 // X-RateLimit-Limit and X-RateLimit-Remaining; a 429 also carries Retry-After.
-func Middleware(l *Limiter, logger *slog.Logger) func(http.Handler) http.Handler {
+func Middleware(l Allower, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key, ok := auth.FromContext(r.Context())
